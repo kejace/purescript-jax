@@ -18,7 +18,9 @@ package:
     - tuples
   test:
     main: Test.Main
-    dependencies: []
+    dependencies:
+      - spec
+      - spec-discovery
 
 workspace:
   packageSet:

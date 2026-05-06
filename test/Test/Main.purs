@@ -6,9 +6,14 @@ import Control.Monad.Trans.Class (lift)
 import Data.Foldable (foldl)
 import Data.Function.Uncurried (Fn3, runFn3)
 import Effect (Effect)
+import Effect.Aff (launchAff_)
+import Effect.Class (liftEffect)
 import Effect.Console (log)
 import Effect.Exception (throw)
 import Foreign (Foreign)
+import Test.Spec (Spec, describe, it)
+import Test.Spec.Reporter.Console (consoleReporter)
+import Test.Spec.Runner (runSpec)
 import Jax.Core
   ( D1
   , D2
@@ -70,36 +75,54 @@ import Data.Foldable (for_)
 import Unsafe.Coerce (unsafeCoerce)
 
 main :: Effect Unit
-main = do
-  init
-  setDefaultDevice "wasm"
-  log "─── Phase 1 FFI parity tests (wasm backend) ───"
-  testConstructorShapes
-  testArangeValues
-  testAddAndMul
-  testMatmulShape
-  testReductions
-  testTranspose
-  testManagedScope
-  testRMSNorm
-  testEmbedUnembed
-  testRoPE
-  testAttention
-  testMLP
-  testBlock
-  testSampling
-  testGenerate
-  testTraining
-  testTokenizer
-  testSentencePieceBPE
-  testSafetensors
-  testTopK
-  testStreaming
-  testTrainingPytree
-  testTransformerTraining
-  testLlamaEndToEnd
-  testNumericalParity
-  log "✓ All tests passed."
+main = launchAff_ do
+  liftEffect init
+  liftEffect (setDefaultDevice "wasm")
+  runSpec [ consoleReporter ] specs
+
+-- | Spec tree. Each describe-it pair wraps an existing `Effect Unit`
+-- | test function via `liftEffect`. The functions still throw on
+-- | failure; spec catches those throws and converts them to a
+-- | structured failure with location, instead of aborting the whole
+-- | run.
+-- |
+-- | To split this into per-module specs later, move each `describe`
+-- | block to its own `Test.<Name>Spec` module exporting `spec :: Spec
+-- | Unit`, then `Test.Main` uses `Test.Spec.Discovery.discover` to
+-- | find them.
+specs :: Spec Unit
+specs = do
+  describe "Phase 1 FFI parity (wasm)" do
+    it "constructor shapes" (liftEffect testConstructorShapes)
+    it "arange values" (liftEffect testArangeValues)
+    it "add / mul" (liftEffect testAddAndMul)
+    it "matmul shape" (liftEffect testMatmulShape)
+    it "reductions" (liftEffect testReductions)
+    it "transpose" (liftEffect testTranspose)
+    it "managed scope" (liftEffect testManagedScope)
+  describe "NN primitives" do
+    it "RMSNorm" (liftEffect testRMSNorm)
+    it "Embed / Unembed" (liftEffect testEmbedUnembed)
+    it "RoPE" (liftEffect testRoPE)
+    it "Attention (incl. GQA)" (liftEffect testAttention)
+    it "MLP (SwiGLU)" (liftEffect testMLP)
+    it "transformerBlock + forwardLogits" (liftEffect testBlock)
+  describe "Inference" do
+    it "sampling" (liftEffect testSampling)
+    it "generate (greedy / cached / temperature)" (liftEffect testGenerate)
+    it "top-k / top-p" (liftEffect testTopK)
+    it "streaming decode" (liftEffect testStreaming)
+  describe "Training" do
+    it "single-tensor sum-square" (liftEffect testTraining)
+    it "pytree (record) Adam" (liftEffect testTrainingPytree)
+    it "full transformer cross-entropy" (liftEffect testTransformerTraining)
+  describe "Loaders" do
+    it "tokenizer (cl100k_base BPE)" (liftEffect testTokenizer)
+    it "SentencePiece BPE parity" (liftEffect testSentencePieceBPE)
+    it "safetensors" (liftEffect testSafetensors)
+    it "Llama end-to-end (synthetic fixture)" (liftEffect testLlamaEndToEnd)
+  describe "Numerical parity" do
+    it "analytic checks" (liftEffect testNumericalParity)
 
 -- Assertions ------------------------------------------------------------------
 
