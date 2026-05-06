@@ -55,3 +55,4 @@ export const onMessageImpl = (w, cb) => { w.onmessage = (e) => cb(e.data)(); };
 export const toNumberImpl = (n) => n;
 
 export const toFixed1Impl = (x) => Number(x).toFixed(1);
+export const toFixed4Impl = (x) => Number(x).toFixed(4);

@@ -71,6 +71,22 @@
       Click "load model + tokenizer" first; then enter a prompt and "generate".
       The benchmark button still uses a tiny synthetic model to compare backends without a real-weight load.
     </p>
+    <hr style="margin:1em 0;border:0;border-top:1px solid #ddd;" />
+    <h2 style="font-size:1.1em;margin:0.4em 0">Training demo (synthetic transformer)</h2>
+    <p style="color:#888;font-size:0.85em;margin:0.3em 0">
+      Trains a tiny in-process transformer (1 layer, 8 hidden, 8 vocab) with cross-entropy loss
+      and Adam to memorize the sequence [1,2,3] → [2,3,4]. Loss should drop from ~2.0 toward zero.
+      Initial / final L2 norm reported via <code>Jax.Pytree</code>'s heterogeneous traversal.
+    </p>
+    <div class="row">
+      <label for="trainSteps">steps</label>
+      <input id="trainSteps" type="number" value="60" min="1" max="500" />
+      &nbsp;
+      <label for="trainLR">learning rate</label>
+      <input id="trainLR" type="text" value="0.05" size="6" />
+      &nbsp;
+      <button id="trainSynthetic">train tiny transformer</button>
+    </div>
     <script type="module" src="/dist/browser.js"></script>
   </body>
 </html>

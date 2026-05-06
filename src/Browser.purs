@@ -6,6 +6,7 @@ import Data.Array (intercalate)
 import Data.Either (Either(..))
 import Data.Int (fromString)
 import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Number (fromString) as Number
 import Data.String (split, trim)
 import Data.String.Pattern (Pattern(..))
 import Data.Traversable (traverse)
@@ -102,6 +103,9 @@ main = do
   statsEl <- getElById "stats"
   benchTable <- getElById "benchTable"
   benchBody <- getElById "benchBody"
+  trainBtn <- getElById "trainSynthetic"
+  trainStepsEl <- getElById "trainSteps"
+  trainLREl <- getElById "trainLR"
   setText backendEl "spawning worker…"
   -- Wire incoming messages from the worker.
   onMessageRaw worker \raw -> case decodeStr workerOutCodec raw of
@@ -129,6 +133,22 @@ main = do
         setText statsEl msg'
       BenchResult r -> appendBenchRow benchBody r
       BenchmarkDone -> setText statsEl "benchmark complete"
+      TrainStart r -> setText statsEl
+        ( "training " <> show r.paramCount <> " params · "
+            <> "initial loss " <> toFixed4 r.initialLoss
+            <> " · L2 " <> toFixed4 r.initialL2
+            <> " · " <> show r.steps <> " steps planned"
+        )
+      TrainStep r -> setText statsEl
+        ( "step " <> show r.step <> " · loss " <> toFixed4 r.loss )
+      TrainDone r -> setText statsEl
+        ( "training complete · final loss " <> toFixed4 r.finalLoss
+            <> " · L2 " <> toFixed4 r.finalL2
+            <> " · before/after gen: "
+            <> formatTokens r.initialGen <> " → " <> formatTokens r.finalGen
+            <> " · " <> toFixed1 r.totalMs <> " ms"
+        )
+      TrainError r -> setText statsEl ("train error: " <> r.err)
       LoadStart r -> setText loadStatusEl ("fetching " <> r.url <> "…")
       LoadConfigMsg _ -> pure unit
       LoadTokenizer r -> setText loadStatusEl
@@ -163,6 +183,18 @@ main = do
     clearOpfs
       (\n -> setText loadStatusEl ("cache cleared (" <> show n <> " entries)"))
       (\err -> setText loadStatusEl ("cache clear failed: " <> err))
+  -- Wire the Train Synthetic button — runs entirely in-process, no
+  -- model load required. Posts TrainStart / TrainStep / TrainDone.
+  onClick trainBtn do
+    setText outputEl ""
+    setStyleDisplay benchTable "none"
+    stepsStr <- getValue trainStepsEl
+    lrStr <- getValue trainLREl
+    let
+      steps = fromMaybe 60 (fromString stepsStr)
+      learningRate = fromMaybe 0.05 (Number.fromString lrStr)
+    setText statsEl ("training " <> show steps <> " steps @ lr=" <> lrStr <> "…")
+    postIn worker $ TrainSynthetic { steps, learningRate }
   -- Wire the Benchmark button. Always uses the synthetic model.
   onClick benchmarkBtn do
     setText outputEl ""
@@ -233,6 +265,12 @@ foreign import toFixed1Impl :: Number -> String
 
 toFixed1 :: Number -> String
 toFixed1 = toFixed1Impl
+
+-- | Format a Number to four decimal places (for losses / L2 norms).
+foreign import toFixed4Impl :: Number -> String
+
+toFixed4 :: Number -> String
+toFixed4 = toFixed4Impl
 
 toN :: Int -> Number
 toN = toNumberImpl

@@ -55,22 +55,28 @@ data WorkerIn
       { benchPrompt :: Array Int
       , maxNew :: Int
       }
+  | TrainSynthetic
+      { steps :: Int
+      , learningRate :: Number
+      }
 
 derive instance Eq WorkerIn
 
-data WorkerInTag = TagLoadModel | TagGenerate | TagBenchmark
+data WorkerInTag = TagLoadModel | TagGenerate | TagBenchmark | TagTrainSynthetic
 
 printIn :: WorkerInTag -> String
 printIn = case _ of
   TagLoadModel -> "loadModel"
   TagGenerate -> "generate"
   TagBenchmark -> "benchmark"
+  TagTrainSynthetic -> "trainSynthetic"
 
 parseIn :: String -> Maybe WorkerInTag
 parseIn = case _ of
   "loadModel" -> Just TagLoadModel
   "generate" -> Just TagGenerate
   "benchmark" -> Just TagBenchmark
+  "trainSynthetic" -> Just TagTrainSynthetic
   _ -> Nothing
 
 loadModelPayload :: JsonCodec { url :: String, tokenizerUrl :: String }
@@ -92,6 +98,12 @@ benchmarkPayload = CAR.object "Benchmark"
   , maxNew: CA.int
   }
 
+trainSyntheticPayload :: JsonCodec { steps :: Int, learningRate :: Number }
+trainSyntheticPayload = CAR.object "TrainSynthetic"
+  { steps: CA.int
+  , learningRate: CA.number
+  }
+
 workerInCodec :: JsonCodec WorkerIn
 workerInCodec = CAS.taggedSum "WorkerIn" printIn parseIn fromIn toIn
   where
@@ -99,11 +111,13 @@ workerInCodec = CAS.taggedSum "WorkerIn" printIn parseIn fromIn toIn
     TagLoadModel -> Right (map LoadModel <<< CA.decode loadModelPayload)
     TagGenerate -> Right (map Generate <<< CA.decode generatePayload)
     TagBenchmark -> Right (map Benchmark <<< CA.decode benchmarkPayload)
+    TagTrainSynthetic -> Right (map TrainSynthetic <<< CA.decode trainSyntheticPayload)
 
   toIn = case _ of
     LoadModel r -> Tuple TagLoadModel (Just (CA.encode loadModelPayload r))
     Generate r -> Tuple TagGenerate (Just (CA.encode generatePayload r))
     Benchmark r -> Tuple TagBenchmark (Just (CA.encode benchmarkPayload r))
+    TrainSynthetic r -> Tuple TagTrainSynthetic (Just (CA.encode trainSyntheticPayload r))
 
 -- =============================================================================
 -- Outbound — worker to browser
@@ -143,6 +157,21 @@ data WorkerOut
       , totalMs :: Number
       }
   | BenchmarkDone
+  | TrainStart
+      { paramCount :: Int
+      , initialLoss :: Number
+      , initialL2 :: Number
+      , steps :: Int
+      }
+  | TrainStep { step :: Int, loss :: Number }
+  | TrainDone
+      { finalLoss :: Number
+      , finalL2 :: Number
+      , initialGen :: Array Int
+      , finalGen :: Array Int
+      , totalMs :: Number
+      }
+  | TrainError { err :: String }
 
 derive instance Eq WorkerOut
 
@@ -150,6 +179,7 @@ data WorkerOutTag
   = TagReady | TagLoadStart | TagLoadConfig | TagLoadTokenizer | TagLoadFetched
   | TagLoadDone | TagLoadError | TagGenerateStart | TagGenerateError | TagTokenText
   | TagDone | TagBenchResult | TagBenchmarkDone
+  | TagTrainStart | TagTrainStep | TagTrainDone | TagTrainError
 
 printOut :: WorkerOutTag -> String
 printOut = case _ of
@@ -166,6 +196,10 @@ printOut = case _ of
   TagDone -> "done"
   TagBenchResult -> "benchResult"
   TagBenchmarkDone -> "benchmarkDone"
+  TagTrainStart -> "trainStart"
+  TagTrainStep -> "trainStep"
+  TagTrainDone -> "trainDone"
+  TagTrainError -> "trainError"
 
 parseOut :: String -> Maybe WorkerOutTag
 parseOut = case _ of
@@ -182,6 +216,10 @@ parseOut = case _ of
   "done" -> Just TagDone
   "benchResult" -> Just TagBenchResult
   "benchmarkDone" -> Just TagBenchmarkDone
+  "trainStart" -> Just TagTrainStart
+  "trainStep" -> Just TagTrainStep
+  "trainDone" -> Just TagTrainDone
+  "trainError" -> Just TagTrainError
   _ -> Nothing
 
 readyP :: JsonCodec { backend :: String }
@@ -234,6 +272,26 @@ benchResultP = CAR.object "BenchResult"
   { backend: CA.string, ok: CA.boolean, count: CA.int
   , prefillMs: CA.number, decodeMs: CA.number, totalMs: CA.number }
 
+trainStartP :: JsonCodec
+  { paramCount :: Int, initialLoss :: Number, initialL2 :: Number, steps :: Int }
+trainStartP = CAR.object "TrainStart"
+  { paramCount: CA.int, initialLoss: CA.number
+  , initialL2: CA.number, steps: CA.int }
+
+trainStepP :: JsonCodec { step :: Int, loss :: Number }
+trainStepP = CAR.object "TrainStep" { step: CA.int, loss: CA.number }
+
+trainDoneP :: JsonCodec
+  { finalLoss :: Number, finalL2 :: Number
+  , initialGen :: Array Int, finalGen :: Array Int, totalMs :: Number }
+trainDoneP = CAR.object "TrainDone"
+  { finalLoss: CA.number, finalL2: CA.number
+  , initialGen: CA.array CA.int, finalGen: CA.array CA.int
+  , totalMs: CA.number }
+
+trainErrorP :: JsonCodec { err :: String }
+trainErrorP = CAR.object "TrainError" { err: CA.string }
+
 workerOutCodec :: JsonCodec WorkerOut
 workerOutCodec = CAS.taggedSum "WorkerOut" printOut parseOut fromOut toOut
   where
@@ -251,6 +309,10 @@ workerOutCodec = CAS.taggedSum "WorkerOut" printOut parseOut fromOut toOut
     TagDone -> Right (map Done <<< CA.decode doneP)
     TagBenchResult -> Right (map BenchResult <<< CA.decode benchResultP)
     TagBenchmarkDone -> Left BenchmarkDone
+    TagTrainStart -> Right (map TrainStart <<< CA.decode trainStartP)
+    TagTrainStep -> Right (map TrainStep <<< CA.decode trainStepP)
+    TagTrainDone -> Right (map TrainDone <<< CA.decode trainDoneP)
+    TagTrainError -> Right (map TrainError <<< CA.decode trainErrorP)
 
   toOut = case _ of
     Ready r -> Tuple TagReady (Just (CA.encode readyP r))
@@ -266,6 +328,10 @@ workerOutCodec = CAS.taggedSum "WorkerOut" printOut parseOut fromOut toOut
     Done r -> Tuple TagDone (Just (CA.encode doneP r))
     BenchResult r -> Tuple TagBenchResult (Just (CA.encode benchResultP r))
     BenchmarkDone -> Tuple TagBenchmarkDone Nothing
+    TrainStart r -> Tuple TagTrainStart (Just (CA.encode trainStartP r))
+    TrainStep r -> Tuple TagTrainStep (Just (CA.encode trainStepP r))
+    TrainDone r -> Tuple TagTrainDone (Just (CA.encode trainDoneP r))
+    TrainError r -> Tuple TagTrainError (Just (CA.encode trainErrorP r))
 
 -- =============================================================================
 -- String helpers

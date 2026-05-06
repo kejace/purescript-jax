@@ -32,7 +32,14 @@ import Jax.NN.Generate
   , generateGreedyCachedStreamUntilWithHead
   )
 import Jax.NN.RoPE (RoPETables, precomputeRoPE)
-import Jax.Pytree (countParams, countTensors)
+import Jax.NN.Train (makeCrossEntropyLoss)
+import Jax.NN.Generate (generateGreedyCached)
+import Jax.Optax as Optax
+import Jax.Autodiff (valueAndGradT)
+import Jax.Pytree (countParams, countTensors, sumSquaredL2)
+import Data.Traversable (traverse)
+import Data.Number as Math
+import Unsafe.Coerce (unsafeCoerce)
 import Jax.Worker.Protocol
   ( WorkerIn(..)
   , WorkerOut(..)
@@ -120,6 +127,7 @@ main = do
       LoadModel r -> handleLoadModel modelRef r.url r.tokenizerUrl
       Generate r -> handleGenerate modelRef r.prompt r.maxNew r.debug
       Benchmark r -> handleBenchmark r.benchPrompt r.maxNew
+      TrainSynthetic r -> handleTrainSynthetic r.steps r.learningRate
 
 -- Model loading -------------------------------------------------------------
 
@@ -427,3 +435,161 @@ buildSyntheticLayer cfg = do
     , mlpNorm
     , mlp: { gateProj: gp, upProj: up, downProj: dp }
     }
+
+-- Training: synthetic small transformer ------------------------------------
+
+-- | Build a `ModelWeights` directly in Effect (no Managed scope), so
+-- | tensors survive across training steps. Uses linspace init like the
+-- | tests' `buildVaryingWeights`.
+buildSyntheticWeights :: ModelConfig -> Effect ModelWeights
+buildSyntheticWeights cfg = do
+  emb <- varyingWeight [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2)
+  fn <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
+  layers <- traverseN' cfg.nLayers \_ -> do
+    attnNorm <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
+    wq <- varyingWeight [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2)
+    wk <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2)
+    wv <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2)
+    wo <- varyingWeight [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2)
+    mlpNorm <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
+    gp <- varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2)
+    up <- varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2)
+    dp <- varyingWeight [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2)
+    pure
+      { attnNorm
+      , attn: { wq, wk, wv, wo }
+      , mlpNorm
+      , mlp: { gateProj: gp, upProj: up, downProj: dp }
+      }
+  pure { embedding: emb, layers, finalNorm: fn }
+
+traverseN' :: forall a. Int -> (Int -> Effect a) -> Effect (Array a)
+traverseN' n f = go 0 []
+  where
+  go i acc
+    | i >= n = pure acc
+    | otherwise = do
+        x <- f i
+        go (i + 1) (Array.snoc acc x)
+
+-- | Refcount-bump every leaf in a `ModelWeights`. Used to give the
+-- | optimizer its own owned references when initializing — `Optax.initT`
+-- | consumes its input.
+refModelWeights :: ModelWeights -> Effect ModelWeights
+refModelWeights w = do
+  emb <- ref w.embedding
+  fn <- ref w.finalNorm
+  layers <- traverse refLayer w.layers
+  pure { embedding: emb, layers, finalNorm: fn }
+  where
+  refLayer lw = do
+    an <- ref lw.attnNorm
+    wq <- ref lw.attn.wq
+    wk <- ref lw.attn.wk
+    wv <- ref lw.attn.wv
+    wo <- ref lw.attn.wo
+    mn <- ref lw.mlpNorm
+    gp <- ref lw.mlp.gateProj
+    up <- ref lw.mlp.upProj
+    dp <- ref lw.mlp.downProj
+    pure
+      { attnNorm: an
+      , attn: { wq, wk, wv, wo }
+      , mlpNorm: mn
+      , mlp: { gateProj: gp, upProj: up, downProj: dp }
+      }
+
+-- | Run a synthetic-transformer training demo: small ModelWeights,
+-- | next-token cross-entropy on a fixed [1,2,3]→[2,3,4] sequence,
+-- | Adam over `steps` iterations, posting per-step loss.
+-- | Reports initial/final L2 norm via the Jax.Pytree heterogeneous
+-- | traversal; reports before/after greedy generation from prompt [1].
+handleTrainSynthetic :: Int -> Number -> Effect Unit
+handleTrainSynthetic steps lr = do
+  let
+    cfg :: ModelConfig
+    cfg =
+      { hidden: 8, nHeads: 2, nKvHeads: 2, headDim: 4
+      , intermediate: 16, nLayers: 1, maxSeqLen: 8
+      , vocabSize: 8, ropeTheta: 10000.0, normEps: 1.0e-6
+      }
+  result <- try do
+    start <- performanceNow
+    weights0 <- buildSyntheticWeights cfg
+    rope <- precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta
+    -- Same toy task as the test: predict prompt[i+1] from prompt[:i+1].
+    promptIds <- arrayInt1D [ 1, 2, 3 ]
+    targetIds <- arrayInt1D [ 2, 3, 4 ]
+    let lossFn = makeCrossEntropyLoss cfg rope promptIds targetIds
+    vagFn <- valueAndGradT lossFn
+    -- Initial diagnostics.
+    initVag <- runEffectFn1 vagFn weights0
+    initLossF <- toJs initVag.value
+    let initialLoss = unsafeCoerce initLossF :: Number
+    dispose initVag.value
+    initialL2sq <- sumSquaredL2 weights0
+    let
+      paramCount = countTensors weights0  -- # tensor leaves; not the param count
+    nParams <- countParams weights0
+    -- Initial generation (greedy from [1]).
+    initialGen <- generateGreedyCached cfg weights0 rope [ 1 ] 3
+    post $ TrainStart
+      { paramCount: nParams
+      , initialLoss
+      , initialL2: Math.sqrt initialL2sq
+      , steps
+      }
+    -- Optimizer init (consumes weights → use a ref-bumped copy).
+    opt <- Optax.adam lr
+    weightsForInit <- refModelWeights weights0
+    state0 <- Optax.initT opt weightsForInit
+    finalState <- trainLoop cfg rope vagFn opt steps 0
+      { weights: weights0, state: state0, grad: initVag.grad }
+    -- Final diagnostics.
+    finalVag <- runEffectFn1 vagFn finalState.weights
+    finalLossF <- toJs finalVag.value
+    let finalLoss = unsafeCoerce finalLossF :: Number
+    dispose finalVag.value
+    finalL2sq <- sumSquaredL2 finalState.weights
+    finalGen <- generateGreedyCached cfg finalState.weights rope [ 1 ] 3
+    end <- performanceNow
+    pure
+      { finalLoss
+      , finalL2: Math.sqrt finalL2sq
+      , initialGen
+      , finalGen
+      , totalMs: end - start
+      , paramCount  -- unused; silences a warning
+      }
+  case result of
+    Left e -> post $ TrainError { err: message e }
+    Right r -> post $ TrainDone
+      { finalLoss: r.finalLoss
+      , finalL2: r.finalL2
+      , initialGen: r.initialGen
+      , finalGen: r.finalGen
+      , totalMs: r.totalMs
+      }
+
+-- | One iteration of the Adam loop. Posts a TrainStep after each.
+trainLoop
+  :: forall e
+   . ModelConfig
+  -> RoPETables
+  -> EffectFn1 ModelWeights { value :: NDArray e, grad :: ModelWeights }
+  -> Optax.Transformation
+  -> Int
+  -> Int
+  -> { weights :: ModelWeights, state :: Optax.OptState, grad :: ModelWeights }
+  -> Effect { weights :: ModelWeights, state :: Optax.OptState }
+trainLoop _ _ _ _ 0 _ acc = pure { weights: acc.weights, state: acc.state }
+trainLoop cfg rope vagFn opt nLeft stepIdx acc = do
+  { updates, state: newState } <- Optax.updateT opt acc.grad acc.state
+  newWeights <- Optax.applyUpdatesT acc.weights updates
+  vag <- runEffectFn1 vagFn newWeights
+  lossF <- toJs vag.value
+  let stepLoss = unsafeCoerce lossF :: Number
+  dispose vag.value
+  post $ TrainStep { step: stepIdx + 1, loss: stepLoss }
+  trainLoop cfg rope vagFn opt (nLeft - 1) (stepIdx + 1)
+    { weights: newWeights, state: newState, grad: vag.grad }
