@@ -4,20 +4,12 @@ module Jax.NN.RoPE
   , applyRoPE
   ) where
 
-import Prelude hiding (add, mul, sub)
+import Prelude
 
 import Effect (Effect)
 import Effect.Uncurried (EffectFn3, runEffectFn3)
-import Jax.Core
-  ( D2
-  , NDArray
-  , add
-  , concatAxis
-  , mul
-  , ref
-  , sliceLastAxis
-  , sub
-  )
+import Jax.Core (D2, NDArray)
+import Jax.Tensor (T, addT, concatAxisT, lit, mulT, run, sliceLastAxisT, subT)
 
 -- | Precomputed rotary frequency tables. cos and sin both have shape
 -- | `[maxSeqLen, dim/2]`. These are constants for the model's lifetime —
@@ -56,26 +48,19 @@ applyRoPE
   -> NDArray d     -- ^ cos table, broadcast-compatible with x
   -> NDArray d     -- ^ sin table, broadcast-compatible with x
   -> Effect (NDArray d)
-applyRoPE halfDim x cosT sinT = do
-  let dim = halfDim * 2
-  -- Split x into halves on the last axis.
-  xR1 <- ref x
-  xFirst <- sliceLastAxis xR1 0 halfDim
-  xR2 <- ref x
-  xSecond <- sliceLastAxis xR2 halfDim dim
-  -- y_first = x_first * cos - x_second * sin
-  xFirstR1 <- ref xFirst
-  cosR1 <- ref cosT
-  prodFC <- mul xFirstR1 cosR1
-  xSecondR1 <- ref xSecond
-  sinR1 <- ref sinT
-  prodSS <- mul xSecondR1 sinR1
-  yFirst <- sub prodFC prodSS
-  -- y_second = x_first * sin + x_second * cos
-  cosR2 <- ref cosT
-  prodSC <- mul xSecond cosR2
-  sinR2 <- ref sinT
-  prodFS <- mul xFirst sinR2
-  ySecond <- add prodFS prodSC
-  -- Concatenate along the last axis.
-  concatAxis [ yFirst, ySecond ] (-1)
+applyRoPE halfDim x cosT sinT = run $ concatAxisT [ yFirst, ySecond ] (-1)
+  where
+  dim = halfDim * 2
+  xT = lit x
+  cT = lit cosT
+  sT = lit sinT
+  -- Each `lit` is a fresh ref-bumped action — `lit x` used twice ref-bumps
+  -- twice. So we reuse the same `xT` / `cT` / `sT` bindings freely.
+  xFirst :: T d
+  xFirst = sliceLastAxisT xT 0 halfDim
+  xSecond :: T d
+  xSecond = sliceLastAxisT xT halfDim dim
+  yFirst :: T d
+  yFirst = subT (mulT xFirst cT) (mulT xSecond sT)
+  ySecond :: T d
+  ySecond = addT (mulT xFirst sT) (mulT xSecond cT)

@@ -1,9 +1,10 @@
 module Jax.NN.RMSNorm (rmsnorm) where
 
-import Prelude hiding (add, mul)
+import Prelude
 
 import Effect (Effect)
-import Jax.Core (D1, NDArray, addScalar, meanAxisKeep, mul, ref, rsqrt, square)
+import Jax.Core (D1, NDArray)
+import Jax.Tensor (addScalarT, lit, meanAxisKeepT, mulT, rsqrtT, run, squareT)
 
 -- | Root mean square normalization.
 -- |
@@ -12,25 +13,19 @@ import Jax.Core (D1, NDArray, addScalar, meanAxisKeep, mul, ref, rsqrt, square)
 -- | Inputs `x` and `weight` are *borrowed* — their refcounts are unchanged
 -- | on return. The output is a fresh tensor (refcount 1) the caller must
 -- | dispose, typically via `Jax.Managed.allocate`.
+-- |
+-- | Implementation uses `Jax.Tensor`'s deferred-effect DSL so the
+-- | refcount discipline is local: each `lit x` use ref-bumps, the
+-- | combinators thread Effect, `run` realizes a single allocation
+-- | with refcount 1.
 rmsnorm
   :: forall d
    . Number
   -> NDArray d
   -> NDArray D1
   -> Effect (NDArray d)
-rmsnorm eps x weight = do
-  -- x²
-  xR1 <- ref x
-  xSq <- square xR1
-  -- mean(x², axis=-1, keepdims=true) → rank-preserving with last axis = 1
-  m <- meanAxisKeep xSq (-1)
-  -- + eps (scalar broadcast)
-  mEps <- addScalar m eps
-  -- rsqrt
-  invRms <- rsqrt mEps
-  -- x * invRms (broadcasts along the last axis)
-  xR2 <- ref x
-  scaled <- mul xR2 invRms
-  -- * weight (broadcasts weight across leading axes of scaled)
-  weightR <- ref weight
-  mul scaled weightR
+rmsnorm eps x weight = run $ mulT (mulT xT invRms) wT
+  where
+  xT = lit x
+  wT = lit weight
+  invRms = rsqrtT (addScalarT (meanAxisKeepT (-1) (squareT xT)) eps)

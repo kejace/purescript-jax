@@ -1,9 +1,10 @@
 module Jax.NN.MLP (mlp) where
 
-import Prelude hiding (mul)
+import Prelude
 
 import Effect (Effect)
-import Jax.Core (D2, NDArray, matmul, mul, ref, silu)
+import Jax.Core (D2, NDArray)
+import Jax.Tensor (lit, matmulT, mulT, run, siluT)
 
 -- | SwiGLU feed-forward block (the Llama-style MLP).
 -- |
@@ -18,25 +19,17 @@ import Jax.Core (D2, NDArray, matmul, mul, ref, silu)
 -- |   down_proj  [intermediate, hidden]
 -- |   out        [seq, hidden]
 -- |
--- | All inputs are borrowed.
+-- | All inputs are borrowed. Implementation uses the `Jax.Tensor` DSL
+-- | so refcount discipline stays inside the wrappers.
 mlp
   :: NDArray D2  -- ^ x
   -> NDArray D2  -- ^ gate_proj
   -> NDArray D2  -- ^ up_proj
   -> NDArray D2  -- ^ down_proj
   -> Effect (NDArray D2)
-mlp x gateProj upProj downProj = do
-  -- gate = x · gate_proj
-  xR1 <- ref x
-  gpR <- ref gateProj
-  gate <- matmul xR1 gpR
-  -- up = x · up_proj
-  xR2 <- ref x
-  upR <- ref upProj
-  up <- matmul xR2 upR
-  -- inner = silu(gate) · up
-  gateSilu <- silu gate
-  inner <- mul gateSilu up
-  -- out = inner · down_proj
-  dpR <- ref downProj
-  matmul inner dpR
+mlp x gateProj upProj downProj = run (matmulT inner (lit downProj))
+  where
+  xT = lit x
+  gate = matmulT xT (lit gateProj)
+  up = matmulT xT (lit upProj)
+  inner = mulT (siluT gate) up

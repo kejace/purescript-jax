@@ -37,6 +37,7 @@ import Jax.Core
   , zeros
   )
 import Jax.NN.Attention (KVCache, KVCacheStack, attention, attentionNoMask)
+import Jax.Tensor as T
 import Jax.NN.Embed (embed, unembed)
 import Jax.NN.MLP (mlp)
 import Jax.NN.RMSNorm (rmsnorm)
@@ -113,41 +114,22 @@ attentionForward
 attentionForward cfg w seqLen cosSlice sinSlice xNormed = do
   let halfDim = cfg.headDim / 2
       qDim = cfg.nHeads * cfg.headDim
-  -- Q projection + reshape to multi-head
-  xR1 <- ref xNormed
-  wqR <- ref w.wq
-  qFlat <- matmul xR1 wqR
-  q <- reshape qFlat [ seqLen, cfg.nHeads, cfg.headDim ]
-  -- K projection + reshape
-  xR2 <- ref xNormed
-  wkR <- ref w.wk
-  kFlat <- matmul xR2 wkR
-  k <- reshape kFlat [ seqLen, cfg.nKvHeads, cfg.headDim ]
-  -- V projection + reshape
-  xR3 <- ref xNormed
-  wvR <- ref w.wv
-  vFlat <- matmul xR3 wvR
-  v <- reshape vFlat [ seqLen, cfg.nKvHeads, cfg.headDim ]
-  -- RoPE on Q and K (rank-polymorphic; cos/sin already shaped to broadcast)
-  cR1 <- ref cosSlice
-  sR1 <- ref sinSlice
-  qRot <- applyRoPE halfDim q cR1 sR1
-  cR2 <- ref cosSlice
-  sR2 <- ref sinSlice
-  kRot <- applyRoPE halfDim k cR2 sR2
+      xT = T.lit xNormed
+  -- Q/K/V projection + reshape via the Tensor DSL — each `lit` ref-bumps
+  -- xNormed once per use, so xNormed itself stays at refcount 1.
+  q <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wq)) [ seqLen, cfg.nHeads, cfg.headDim ])
+  k <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wk)) [ seqLen, cfg.nKvHeads, cfg.headDim ])
+  v <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wv)) [ seqLen, cfg.nKvHeads, cfg.headDim ])
+  -- RoPE on Q and K (rank-polymorphic; cos/sin already shaped to broadcast).
+  qRot <- applyRoPE halfDim q cosSlice sinSlice
+  kRot <- applyRoPE halfDim k cosSlice sinSlice
   -- GQA expansion: pre-repeat-interleave kv heads up to n_q heads so
   -- jax-js's SDPA sees N == K and skips its internal `tile`-based
-  -- expansion. The internal tile uses the wrong head pairing for HF
-  -- Llama (which trains q_head_i ↔ kv_head_(i // G), matching
-  -- repeat_interleave, not tile).
+  -- expansion (which uses the wrong head pairing for HF Llama).
   kFull <- expandKV cfg kRot
   vFull <- expandKV cfg v
-  -- SDPA
   attnOut <- attention qRot kFull vFull
-  -- Reshape multi-head output back to flat dim and project
-  attnOutFlat <- reshape attnOut [ seqLen, qDim ]
-  woR <- ref w.wo
-  matmul attnOutFlat woR
+  T.run (T.matmulT (T.reshapeT (T.lit attnOut) [ seqLen, qDim ]) (T.lit w.wo))
 
 -- | One transformer block with residuals:
 -- |   h = x + attention(rmsnorm(x))
@@ -161,23 +143,17 @@ transformerBlock
   -> NDArray D2    -- x [seq, hidden]
   -> Effect (NDArray D2)
 transformerBlock cfg lw seqLen cosSlice sinSlice x = do
-  -- Pre-attention norm
-  xR1 <- ref x
-  anR <- ref lw.attnNorm
-  xNormed <- rmsnorm cfg.normEps xR1 anR
-  -- Attention sub-block
+  -- Pre-attention norm: rmsnorm now uses the Tensor DSL internally,
+  -- so this is a single Effect call without ref-bumping its inputs.
+  xNormed <- rmsnorm cfg.normEps x lw.attnNorm
   attnOut <- attentionForward cfg lw.attn seqLen cosSlice sinSlice xNormed
-  -- Residual: h = x + attn_out
-  xR2 <- ref x
-  h <- add xR2 attnOut
-  -- Pre-MLP norm
-  hR1 <- ref h
-  mnR <- ref lw.mlpNorm
-  hNormed <- rmsnorm cfg.normEps hR1 mnR
-  -- MLP
+  -- Residual: h = x + attn_out. Tensor DSL handles the ref-bump.
+  h <- T.run (T.addT (T.lit x) (T.lit attnOut))
+  hNormed <- rmsnorm cfg.normEps h lw.mlpNorm
   mlpOut <- mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
-  -- Residual: out = h + mlp_out
-  add h mlpOut
+  -- Free attnOut + mlpOut by way of consuming them in Tensor; lit on
+  -- `h` ref-bumps it so it survives for the second add.
+  T.run (T.addT (T.lit h) (T.lit mlpOut))
 
 -- | Full stack: embed → n × transformerBlock → finalNorm. Returns the
 -- | final hidden states (not yet projected to logits).
@@ -207,6 +183,11 @@ transformerBlocksAndNorm
   -> Effect (NDArray D2)
 transformerBlocksAndNorm cfg w rope seqLen hidden0 = do
   let halfDim = cfg.headDim / 2
+  -- Slice axis 0 (seq dim) of the precomputed RoPE tables and reshape
+  -- to broadcast against the per-head tensor `[seq, n_heads, head_dim]`.
+  -- sliceAxis isn't in the Tensor DSL (axis-N slicing has rank
+  -- implications the DSL deliberately abstracts away); kept as raw
+  -- Core for these two single-op chains.
   cosFullR <- ref rope.cos
   cosSlice2 <- sliceAxis cosFullR 0 0 seqLen
   cosSlice3 <- reshape cosSlice2 [ seqLen, 1, halfDim ]
@@ -217,9 +198,7 @@ transformerBlocksAndNorm cfg w rope seqLen hidden0 = do
     (\h lw -> transformerBlock cfg lw seqLen cosSlice3 sinSlice3 h)
     hidden0
     w.layers
-  hR <- ref hiddenN
-  fnR <- ref w.finalNorm
-  rmsnorm cfg.normEps hR fnR
+  rmsnorm cfg.normEps hiddenN w.finalNorm
 
 -- | Full forward including LM head: returns logits over the vocabulary.
 forwardLogits
@@ -296,55 +275,34 @@ attentionForwardCached
 attentionForwardCached cfg w newSeq cosSlice sinSlice prevCache xNormed = do
   let halfDim = cfg.headDim / 2
       qDim = cfg.nHeads * cfg.headDim
-  -- Q projection
-  xR1 <- ref xNormed
-  wqR <- ref w.wq
-  qFlat <- matmul xR1 wqR
-  q <- reshape qFlat [ newSeq, cfg.nHeads, cfg.headDim ]
-  -- K projection
-  xR2 <- ref xNormed
-  wkR <- ref w.wk
-  kFlat <- matmul xR2 wkR
-  newK <- reshape kFlat [ newSeq, cfg.nKvHeads, cfg.headDim ]
-  -- V projection
-  xR3 <- ref xNormed
-  wvR <- ref w.wv
-  vFlat <- matmul xR3 wvR
-  newV <- reshape vFlat [ newSeq, cfg.nKvHeads, cfg.headDim ]
-  -- RoPE on Q and (new) K only — cached K already had RoPE applied
-  cR1 <- ref cosSlice
-  sR1 <- ref sinSlice
-  qRot <- applyRoPE halfDim q cR1 sR1
-  cR2 <- ref cosSlice
-  sR2 <- ref sinSlice
-  newKRot <- applyRoPE halfDim newK cR2 sR2
-  -- Concat with cache along axis 0 (the seq axis)
+      xT = T.lit xNormed
+  -- Q/K/V projection + reshape via the Tensor DSL.
+  q <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wq)) [ newSeq, cfg.nHeads, cfg.headDim ])
+  newK <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wk)) [ newSeq, cfg.nKvHeads, cfg.headDim ])
+  newV <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wv)) [ newSeq, cfg.nKvHeads, cfg.headDim ])
+  -- RoPE on Q and (new) K only — cached K already had RoPE applied.
+  qRot <- applyRoPE halfDim q cosSlice sinSlice
+  newKRot <- applyRoPE halfDim newK cosSlice sinSlice
+  -- Concat with cache along axis 0 (the seq axis).
   fullK <- concatAxis [ prevCache.k, newKRot ] 0
   fullV <- concatAxis [ prevCache.v, newV ] 0
-  -- We'll need fullK and fullV both for attention AND to retain in the new
-  -- cache, so bump them once before handing into attention.
+  -- We'll need fullK and fullV both for attention AND to retain in the
+  -- new cache, so bump them once before handing into attention.
   fullKRA <- ref fullK
   fullVRA <- ref fullV
-  -- GQA expansion: see `attentionForward` for why we pre-expand here.
   fullKExp <- expandKV cfg fullKRA
   fullVExp <- expandKV cfg fullVRA
-  -- Mask choice: when the cache is empty (prefill, newSeq == kvSeq) we
-  -- want a standard causal mask. For single-token decode (newSeq == 1
-  -- with non-empty cache) the single new query is at the latest
-  -- position and must attend to all of K/V — *no* mask. jax-js's
-  -- `isCausal` aligns Q/K at position 0 and would mask the decode
-  -- query down to seeing only K[0], giving a degenerate "pu pu pu"
-  -- loop.
+  -- Mask choice: prefill (newSeq == kvSeq) gets a standard causal
+  -- mask; decode (newSeq < kvSeq) needs *no* mask, since jax-js's
+  -- isCausal aligns Q/K at position 0 and would mask the decode query
+  -- down to seeing only K[0] — a known degenerate loop.
   fullKShape <- shape fullK
   let kvSeq = fromMaybe 0 (Array.head fullKShape)
   attnOut <-
     if newSeq == kvSeq
       then attention qRot fullKExp fullVExp
       else attentionNoMask qRot fullKExp fullVExp
-  -- Project output
-  attnOutFlat <- reshape attnOut [ newSeq, qDim ]
-  woR <- ref w.wo
-  output <- matmul attnOutFlat woR
+  output <- T.run (T.matmulT (T.reshapeT (T.lit attnOut) [ newSeq, qDim ]) (T.lit w.wo))
   pure { newCache: { k: fullK, v: fullV }, output }
 
 -- | One transformer block, KVCache-aware.
@@ -358,18 +316,13 @@ transformerBlockCached
   -> NDArray D2
   -> Effect { newCache :: KVCache, output :: NDArray D2 }
 transformerBlockCached cfg lw newSeq cosSlice sinSlice prevCache x = do
-  xR1 <- ref x
-  anR <- ref lw.attnNorm
-  xNormed <- rmsnorm cfg.normEps xR1 anR
+  xNormed <- rmsnorm cfg.normEps x lw.attnNorm
   { newCache, output: attnOut } <-
     attentionForwardCached cfg lw.attn newSeq cosSlice sinSlice prevCache xNormed
-  xR2 <- ref x
-  h <- add xR2 attnOut
-  hR1 <- ref h
-  mnR <- ref lw.mlpNorm
-  hNormed <- rmsnorm cfg.normEps hR1 mnR
+  h <- T.run (T.addT (T.lit x) (T.lit attnOut))
+  hNormed <- rmsnorm cfg.normEps h lw.mlpNorm
   mlpOut <- mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
-  out <- add h mlpOut
+  out <- T.run (T.addT (T.lit h) (T.lit mlpOut))
   pure { newCache, output: out }
 
 -- | Cached forward pass over the full layer stack. Handles both prefill
@@ -420,8 +373,6 @@ forwardCachedWithHead cfg w head rope cache startPos newIds = do
     )
     { hidden: hidden0, cachesRev: [] }
     layerPairs
-  hR <- ref result.hidden
-  fnR <- ref w.finalNorm
-  hNormed <- rmsnorm cfg.normEps hR fnR
+  hNormed <- rmsnorm cfg.normEps result.hidden w.finalNorm
   logits <- unembed hNormed head
   pure { newCache: result.cachesRev, logits }
