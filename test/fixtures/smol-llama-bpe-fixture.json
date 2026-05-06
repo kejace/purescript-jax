@@ -1,0 +1,249 @@
+{
+  "model": "Felladrin/Smol-Llama-101M-Chat-v1/tokenizer.model",
+  "vocabSize": 32000,
+  "bos": 1,
+  "eos": 2,
+  "unk": 0,
+  "cases": [
+    {
+      "text": "",
+      "ids": [],
+      "pieces": [],
+      "decoded": ""
+    },
+    {
+      "text": "Hello",
+      "ids": [
+        15043
+      ],
+      "pieces": [
+        "▁Hello"
+      ],
+      "decoded": "Hello"
+    },
+    {
+      "text": "Hello world",
+      "ids": [
+        15043,
+        3186
+      ],
+      "pieces": [
+        "▁Hello",
+        "▁world"
+      ],
+      "decoded": "Hello world"
+    },
+    {
+      "text": "The quick brown fox jumps over the lazy dog.",
+      "ids": [
+        450,
+        4996,
+        17354,
+        1701,
+        29916,
+        432,
+        17204,
+        975,
+        278,
+        17366,
+        11203,
+        29889
+      ],
+      "pieces": [
+        "▁The",
+        "▁quick",
+        "▁brown",
+        "▁fo",
+        "x",
+        "▁j",
+        "umps",
+        "▁over",
+        "▁the",
+        "▁lazy",
+        "▁dog",
+        "."
+      ],
+      "decoded": "The quick brown fox jumps over the lazy dog."
+    },
+    {
+      "text": "Once upon a time",
+      "ids": [
+        9038,
+        2501,
+        263,
+        931
+      ],
+      "pieces": [
+        "▁Once",
+        "▁upon",
+        "▁a",
+        "▁time"
+      ],
+      "decoded": "Once upon a time"
+    },
+    {
+      "text": "1 + 1 = 2",
+      "ids": [
+        29871,
+        29896,
+        718,
+        29871,
+        29896,
+        353,
+        29871,
+        29906
+      ],
+      "pieces": [
+        "▁",
+        "1",
+        "▁+",
+        "▁",
+        "1",
+        "▁=",
+        "▁",
+        "2"
+      ],
+      "decoded": "1 + 1 = 2"
+    },
+    {
+      "text": "café",
+      "ids": [
+        274,
+        28059
+      ],
+      "pieces": [
+        "▁c",
+        "afé"
+      ],
+      "decoded": "café"
+    },
+    {
+      "text": "naïve résumé",
+      "ids": [
+        1055,
+        30085,
+        345,
+        6896,
+        398,
+        29948
+      ],
+      "pieces": [
+        "▁na",
+        "ï",
+        "ve",
+        "▁rés",
+        "um",
+        "é"
+      ],
+      "decoded": "naïve résumé"
+    },
+    {
+      "text": "🦀 rust",
+      "ids": [
+        29871,
+        243,
+        162,
+        169,
+        131,
+        21580
+      ],
+      "pieces": [
+        "▁",
+        "<0xF0>",
+        "<0x9F>",
+        "<0xA6>",
+        "<0x80>",
+        "▁rust"
+      ],
+      "decoded": "🦀 rust"
+    },
+    {
+      "text": "<|im_start|>user\nHi<|im_end|>",
+      "ids": [
+        529,
+        29989,
+        326,
+        29918,
+        2962,
+        29989,
+        29958,
+        1792,
+        13,
+        18567,
+        29966,
+        29989,
+        326,
+        29918,
+        355,
+        29989,
+        29958
+      ],
+      "pieces": [
+        "▁<",
+        "|",
+        "im",
+        "_",
+        "start",
+        "|",
+        ">",
+        "user",
+        "<0x0A>",
+        "Hi",
+        "<",
+        "|",
+        "im",
+        "_",
+        "end",
+        "|",
+        ">"
+      ],
+      "decoded": "<|im_start|>user\nHi<|im_end|>"
+    },
+    {
+      "text": "  multiple   spaces  ",
+      "ids": [
+        259,
+        2999,
+        259,
+        8162,
+        259
+      ],
+      "pieces": [
+        "▁▁",
+        "▁multiple",
+        "▁▁",
+        "▁spaces",
+        "▁▁"
+      ],
+      "decoded": "  multiple   spaces  "
+    },
+    {
+      "text": "newline\nhere",
+      "ids": [
+        25899,
+        13,
+        4150
+      ],
+      "pieces": [
+        "▁newline",
+        "<0x0A>",
+        "here"
+      ],
+      "decoded": "newline\nhere"
+    },
+    {
+      "text": "tab\there",
+      "ids": [
+        4434,
+        12,
+        4150
+      ],
+      "pieces": [
+        "▁tab",
+        "<0x09>",
+        "here"
+      ],
+      "decoded": "tab\there"
+    }
+  ]
+}
