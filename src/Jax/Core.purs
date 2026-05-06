@@ -4,8 +4,6 @@ module Jax.Core
   , D2
   , D3
   , D4
-  , LongLived(..)
-  , unLongLived
   , init
   , setDefaultDevice
   , devicePut
@@ -54,12 +52,15 @@ module Jax.Core
   , sumAxis
   , cumsum
   , shape
+  , dimAt
   , dataSync
   , toJs
   ) where
 
 import Prelude
 
+import Data.Array as Array
+import Data.Maybe (fromMaybe)
 import Effect (Effect)
 import Effect.Uncurried
   ( EffectFn1
@@ -85,15 +86,6 @@ data D1
 data D2
 data D3
 data D4
-
--- | Marks a tensor whose lifetime exceeds any `Managed` scope (model
--- | weights, RoPE tables, embedding matrices). The newtype is a trip wire
--- | for accidental disposal: `dispose` only accepts an `NDArray d`, so a
--- | `LongLived (NDArray d)` must be deliberately unwrapped first.
-newtype LongLived a = LongLived a
-
-unLongLived :: forall a. LongLived a -> a
-unLongLived (LongLived a) = a
 
 -- Backend ---------------------------------------------------------------------
 
@@ -398,6 +390,14 @@ foreign import jsImpl :: forall d. EffectFn1 (NDArray d) Foreign
 
 shape :: forall d. NDArray d -> Effect (Array Int)
 shape = runEffectFn1 shapeImpl
+
+-- | Read a single dimension by index. Returns 0 if `axis` is out of
+-- | bounds (matches the behaviour of `fromMaybe 0 <<< (sh !! axis)`
+-- | that recurs ~20 times across the codebase).
+dimAt :: forall d. NDArray d -> Int -> Effect Int
+dimAt a axis = do
+  sh <- shape a
+  pure (fromMaybe 0 (Array.index sh axis))
 
 dataSync :: forall d. NDArray d -> Effect Foreign
 dataSync = runEffectFn1 dataSyncImpl

@@ -18,7 +18,7 @@ import Effect.Ref (Ref)
 import Effect.Ref as Ref
 import Effect.Uncurried (EffectFn1, runEffectFn1)
 import Jax.Coerce (asArray1D, asArray1DInt)
-import Jax.Core (D1, D2, NDArray, arrayInt1D, dispose, linspace, ref, reshape, shape, sliceAxis, toJs, topK)
+import Jax.Core (D1, D2, NDArray, arrayInt1D, dimAt, dispose, linspace, ref, reshape, sliceAxis, toJs, topK)
 import Jax.Loaders.Config (parseLlamaConfig)
 import Jax.Loaders.Fetch (fetchBytes, fetchText)
 import Jax.Loaders.LlamaAdapter (loadLlamaWeights)
@@ -291,14 +291,8 @@ diagPrefillTop5 lm promptIds = do
   ids <- arrayInt1D promptIds
   { logits } <- forwardCachedWithHead lm.cfg lm.weights lm.lmHead lm.rope cache0 0 ids
   dispose ids
-  sh <- shape logits
-  let
-    seqLen = case Array.head sh of
-      Just n -> n
-      Nothing -> 0
-    vocab = case sh Array.!! 1 of
-      Just n -> n
-      Nothing -> 0
+  seqLen <- dimAt logits 0
+  vocab <- dimAt logits 1
   logitsR <- ref logits
   lastRow <- sliceAxis logitsR 0 (seqLen - 1) seqLen
   dispose logits

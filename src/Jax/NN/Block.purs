@@ -28,11 +28,11 @@ import Jax.Core
   , NDArray
   , add
   , concatAxis
+  , dimAt
   , matmul
   , ref
   , repeatAxis
   , reshape
-  , shape
   , sliceAxis
   , zeros
   )
@@ -164,8 +164,7 @@ transformerStack
   -> NDArray D1   -- token IDs [seq]
   -> Effect (NDArray D2)
 transformerStack cfg w rope ids = do
-  idsShape <- shape ids
-  let seqLen = fromMaybe 0 (Array.head idsShape)
+  seqLen <- dimAt ids 0
   hidden0 <- embed w.embedding ids
   transformerBlocksAndNorm cfg w rope seqLen hidden0
 
@@ -296,8 +295,7 @@ attentionForwardCached cfg w newSeq cosSlice sinSlice prevCache xNormed = do
   -- mask; decode (newSeq < kvSeq) needs *no* mask, since jax-js's
   -- isCausal aligns Q/K at position 0 and would mask the decode query
   -- down to seeing only K[0] — a known degenerate loop.
-  fullKShape <- shape fullK
-  let kvSeq = fromMaybe 0 (Array.head fullKShape)
+  kvSeq <- dimAt fullK 0
   attnOut <-
     if newSeq == kvSeq
       then attention qRot fullKExp fullVExp
@@ -352,10 +350,8 @@ forwardCachedWithHead
   -> NDArray D1
   -> Effect { newCache :: KVCacheStack, logits :: NDArray D2 }
 forwardCachedWithHead cfg w head rope cache startPos newIds = do
-  newIdsShape <- shape newIds
-  let
-    newSeq = fromMaybe 0 (Array.head newIdsShape)
-    halfDim = cfg.headDim / 2
+  newSeq <- dimAt newIds 0
+  let halfDim = cfg.headDim / 2
   -- Embed
   hidden0 <- embed w.embedding newIds
   -- RoPE slices for the new positions only

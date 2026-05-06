@@ -49,10 +49,10 @@ import Jax.Core
   , D2
   , NDArray
   , arrayInt1D
+  , dimAt
   , dispose
   , ref
   , reshape
-  , shape
   , sliceAxis
   )
 import Jax.NN.Attention (KVCache, KVCacheStack)
@@ -98,10 +98,8 @@ type StopCond = Int -> Boolean
 -- | every sampler call site used to repeat ~7 lines of plumbing.
 withLastRow :: forall a. NDArray D2 -> (NDArray D1 -> Effect a) -> Effect a
 withLastRow logits k = do
-  sh <- shape logits
-  let
-    seqLen = fromMaybe 0 (Array.head sh)
-    vocab = fromMaybe 0 (sh Array.!! 1)
+  seqLen <- dimAt logits 0
+  vocab <- dimAt logits 1
   logitsR <- ref logits
   lastRow <- sliceAxis logitsR 0 (seqLen - 1) seqLen
   dispose logits

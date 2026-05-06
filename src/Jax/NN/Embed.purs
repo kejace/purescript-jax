@@ -11,7 +11,8 @@ import Jax.Tensor (lit, matmulT, run, transposeT)
 
 -- | Token embedding lookup: `table[ids]`.
 -- |
--- | * `table` — `[vocab_size, embed_dim]` (D2). Typically `LongLived`.
+-- | * `table` — `[vocab_size, embed_dim]` (D2). Long-lived (caller's
+-- |   responsibility to keep alive across the whole inference run).
 -- | * `ids`   — `[seq_len]` (D1, int32 token IDs).
 -- | * result  — `[seq_len, embed_dim]` (D2), refcount 1.
 -- |

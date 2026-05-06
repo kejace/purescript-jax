@@ -13,7 +13,7 @@ import Jax.Tensor (T, addT, concatAxisT, lit, mulT, run, sliceLastAxisT, subT)
 
 -- | Precomputed rotary frequency tables. cos and sin both have shape
 -- | `[maxSeqLen, dim/2]`. These are constants for the model's lifetime —
--- | the caller should wrap each in `LongLived`.
+-- | precompute once at load and keep alive across all inference calls.
 type RoPETables = { cos :: NDArray D2, sin :: NDArray D2 }
 
 foreign import precomputeRoPEImpl
