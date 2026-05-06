@@ -54,38 +54,83 @@ export const parseSafetensorsImpl = (bytes) => {
     throw new Error(`Failed to parse safetensors header JSON: ${e}`);
   }
   const dataStart = base + 8 + headerLen;
+
+  // Pre-flight memory estimate. After BF16 → F32 promotion, the
+  // working set is up to 2× the on-disk safetensors size, plus the
+  // original buffer must stay alive for the parse loop. wasm32 caps
+  // total linear memory at 4 GiB; in practice browsers limit further.
+  // Surface a clear error before the parse loop hits an opaque wasm
+  // trap. The threshold is conservative — leaves headroom for jax-js
+  // intermediate buffers + the fetched safetensors blob.
+  let bf16Bytes = 0, f32Bytes = 0;
+  for (const name of Object.keys(header)) {
+    if (name === "__metadata__") continue;
+    const e = header[name];
+    const sz = e.data_offsets[1] - e.data_offsets[0];
+    if (e.dtype === "BF16") bf16Bytes += sz; else f32Bytes += sz;
+  }
+  const promoted = f32Bytes + bf16Bytes * 2; // BF16 → F32 doubles
+  const sourceMb = (bf16Bytes + f32Bytes) / 1e6;
+  const promotedMb = promoted / 1e6;
+  console.log(
+    `[safetensors] header=${headerLen} bytes · ${Object.keys(header).length} entries · `
+      + `source=${sourceMb.toFixed(0)} MB · post-promotion=${promotedMb.toFixed(0)} MB`
+  );
+  // Diagnostic-only — can't refuse without knowing the backend, which
+  // lives in the worker. Surface a heads-up so the user knows whether
+  // a failure is likely capacity-bound.
+  if (promoted > 3.0e9) {
+    console.warn(
+      `[safetensors] working set exceeds ~3 GB after promotion. wasm32 backends `
+        + `cap at 4 GB total linear memory; if you're not on WebGPU this load `
+        + `will likely fail with "Out of bounds access" (= wasm OOM trap).`
+    );
+  }
+
   const out = {};
+  let n = 0, total = Object.keys(header).filter(k => k !== "__metadata__").length;
   for (const name of Object.keys(header)) {
     if (name === "__metadata__") continue;
     const { dtype, shape, data_offsets } = header[name];
     const byteOffset = dataStart + data_offsets[0];
     const byteLength = data_offsets[1] - data_offsets[0];
-    if (dtype === "BF16") {
-      const f32 = bf16ToFloat32(buffer, byteOffset, byteLength);
-      out[name] = np.array(f32, { dtype: "float32", shape });
-      continue;
+    n++;
+    try {
+      if (dtype === "BF16") {
+        const f32 = bf16ToFloat32(buffer, byteOffset, byteLength);
+        out[name] = np.array(f32, { dtype: "float32", shape });
+        continue;
+      }
+      const dt = dtypeMap[dtype];
+      if (!dt) throw new Error(`Unsupported safetensors dtype: ${dtype}`);
+      let data;
+      switch (dtype) {
+        case "F16":  data = new Float16Array(buffer, byteOffset, byteLength / 2); break;
+        case "F32":  data = new Float32Array(buffer, byteOffset, byteLength / 4); break;
+        case "F64":  data = new Float64Array(buffer, byteOffset, byteLength / 8); break;
+        case "I8":   data = new Int8Array(buffer, byteOffset, byteLength);        break;
+        case "I16":  data = new Int16Array(buffer, byteOffset, byteLength / 2);   break;
+        case "I32":  data = new Int32Array(buffer, byteOffset, byteLength / 4);   break;
+        case "I64":  data = new BigInt64Array(buffer, byteOffset, byteLength / 8);break;
+        case "U8":
+        case "BOOL": data = new Uint8Array(buffer, byteOffset, byteLength);       break;
+        case "U16":  data = new Uint16Array(buffer, byteOffset, byteLength / 2);  break;
+        case "U32":  data = new Uint32Array(buffer, byteOffset, byteLength / 4);  break;
+        default: throw new Error(`Unsupported safetensors dtype branch: ${dtype}`);
+      }
+      out[name] = np.array(data, { dtype: dt, shape });
+    } catch (e) {
+      // Re-throw with context: which tensor, how big, and how far in.
+      // The user previously saw a bare "Out of bounds access" with no
+      // way to tell which tensor or where in the file.
+      throw new Error(
+        `safetensors parse failed at tensor ${n}/${total} "${name}" `
+          + `(dtype=${dtype}, shape=[${shape}], byteLength=${byteLength}, `
+          + `offset=${byteOffset}): ${e?.message || e}`
+      );
     }
-    const dt = dtypeMap[dtype];
-    if (!dt) throw new Error(`Unsupported safetensors dtype: ${dtype}`);
-    let data;
-    switch (dtype) {
-      case "F16":  data = new Float16Array(buffer, byteOffset, byteLength / 2); break;
-      case "F32":  data = new Float32Array(buffer, byteOffset, byteLength / 4); break;
-      case "F64":  data = new Float64Array(buffer, byteOffset, byteLength / 8); break;
-      case "I8":   data = new Int8Array(buffer, byteOffset, byteLength);        break;
-      case "I16":  data = new Int16Array(buffer, byteOffset, byteLength / 2);   break;
-      case "I32":  data = new Int32Array(buffer, byteOffset, byteLength / 4);   break;
-      case "I64":  data = new BigInt64Array(buffer, byteOffset, byteLength / 8);break;
-      case "U8":
-      case "BOOL": data = new Uint8Array(buffer, byteOffset, byteLength);       break;
-      case "U16":  data = new Uint16Array(buffer, byteOffset, byteLength / 2);  break;
-      case "U32":  data = new Uint32Array(buffer, byteOffset, byteLength / 4);  break;
-      // U64/BigUint64Array would also fit here but jax-js's np.array
-      // doesn't accept BigUint64Array; add when needed.
-      default: throw new Error(`Unsupported safetensors dtype branch: ${dtype}`);
-    }
-    out[name] = np.array(data, { dtype: dt, shape });
   }
+  console.log(`[safetensors] parsed ${total} tensors successfully`);
   return out;
 };
 
