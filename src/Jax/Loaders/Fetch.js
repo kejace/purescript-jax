@@ -33,7 +33,23 @@ async function getCached(url) {
   }
 }
 
+// Default OPFS quota is ~1-2 GB per origin without `persist()`, and
+// large writes can fail mid-stream with a transient OOM-style error
+// even when the quota isn't strictly exceeded. Skip caching anything
+// large up front so we don't generate an alarming warning that looks
+// like the load failed (it didn't — the bytes are already in memory
+// and being handed to the parser). Threshold chosen to fit Smol-Llama
+// (~400 MB) in cache while skipping TinyLlama (~2.2 GB) and larger.
+const CACHE_MAX_BYTES = 1_500_000_000;
+
 async function putCached(url, bytes) {
+  if (bytes.byteLength > CACHE_MAX_BYTES) {
+    console.log(
+      `[fetch-cache] skip ${url} (${(bytes.byteLength / 1e6).toFixed(0)} MB > `
+        + `${(CACHE_MAX_BYTES / 1e6).toFixed(0)} MB threshold) — every reload will re-fetch`
+    );
+    return;
+  }
   try {
     const root = await getOpfsRoot();
     const key = await urlKey(url);
@@ -42,7 +58,11 @@ async function putCached(url, bytes) {
     await ws.write(bytes);
     await ws.close();
   } catch (e) {
-    console.warn(`[fetch-cache] write failed for ${url}:`, e);
+    // Best-effort cache; load already succeeded. Surface as info, not warn.
+    console.log(
+      `[fetch-cache] write failed for ${url} (${e?.message || e}); `
+        + `load still succeeded — this URL will be re-fetched on next reload`
+    );
   }
 }
 

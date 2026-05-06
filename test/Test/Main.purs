@@ -42,7 +42,9 @@ import Jax.Core
   , transpose
   , zeros
   )
-import Jax.Managed (allocate, runManaged)
+import Jax.Managed (Managed, allocate, runManaged)
+import Jax.Tensor (T, lit, reshapeT, run, (+.), (-.), (*.), (**.))
+import Jax.Tensor as T
 import Jax.NN.Attention (attention)
 import Jax.NN.Block (ModelConfig, ModelWeights, forwardLogits)
 import Data.Traversable (traverse)
@@ -67,7 +69,7 @@ import Jax.NN.Train (makeCrossEntropyLoss)
 import Jax.Loaders.Tokenizer (defaultTokenizer, encode, decode) as Tok
 import Jax.Loaders.SentencePieceBPE as SBPE
 import Jax.Loaders.Safetensors (parseSafetensors, tensorNames, getTensor) as ST
-import Test.SafetensorsFixture (makeFixture)
+import Test.SafetensorsFixture (makeFixture, makeBF16Fixture)
 import Test.BpeFixture as BpeFix
 import Test.LlamaFixture (makeLlamaFixture, llamaFixtureCfg)
 import Jax.Loaders.LlamaAdapter (loadLlamaWeights)
@@ -185,6 +187,45 @@ foreign import allCloseImpl :: Fn3 Number (Array Number) (Array Number) Boolean
 allClose :: Number -> Array Number -> Array Number -> Boolean
 allClose tol a b = runFn3 allCloseImpl tol a b
 
+-- Tensor-DSL test helpers -----------------------------------------------------
+-- Each helper realizes the deferred T expression once via `T.run`,
+-- inspects the resulting NDArray, then disposes it. Inputs the
+-- expression borrows (via `lit`) are untouched. This lets test
+-- bodies stay declarative — `lit a +. lit b` instead of the manual
+-- `lift (ref a) >>= \aR -> lift (ref b) >>= \bR -> allocate (add aR bR)` dance.
+
+-- Run + flatten + assert closeness against a 1D expected vector.
+-- Works for any rank: we reshape to D1 first so `assertCloseArray`
+-- can compare a flat array.
+checkT :: forall d. String -> Array Number -> T d -> Effect Unit
+checkT label expected t = do
+  r <- run (reshapeT t [ length expected ] :: T D1)
+  f <- toJs r
+  dispose r
+  assertCloseArray label expected (asArray1D f)
+
+-- Run + read shape + assert.
+checkShape :: forall d. String -> Array Int -> T d -> Effect Unit
+checkShape label expected t = do
+  r <- run t
+  s <- shape r
+  dispose r
+  assertEqArrayInt label expected s
+
+-- Run + read scalar + assert. Use for reductions producing a 0-rank.
+checkScalar :: forall d. String -> Number -> T d -> Effect Unit
+checkScalar label expected t = do
+  r <- run t
+  f <- toJs r
+  dispose r
+  assertCloseNum label expected (asNumber f)
+
+-- Variant of `runManaged` that drops the continuation result and
+-- returns `Effect Unit` — convenient when the asserts inside the
+-- managed scope are the test's only effect.
+runManaged_ :: Managed Unit -> Effect Unit
+runManaged_ m = runManaged m \_ -> pure unit
+
 -- Tests -----------------------------------------------------------------------
 
 testConstructorShapes :: Effect Unit
@@ -209,77 +250,48 @@ testArangeValues = do
 testAddAndMul :: Effect Unit
 testAddAndMul = do
   log "add / mul:"
-  runManaged
-    ( do
-        a <- allocate (ones [ 4 ] :: Effect (NDArray D1))
-        b <- allocate (ones [ 4 ] :: Effect (NDArray D1))
-        aR <- lift (ref a)
-        bR <- lift (ref b)
-        allocate (add aR bR :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "ones[4] + ones[4]" [ 2.0, 2.0, 2.0, 2.0 ] (asArray1D f)
-  runManaged
-    ( do
-        a <- allocate (arange 0.0 4.0 1.0)
-        aR <- lift (ref a)
-        bR <- lift (ref a)
-        allocate (mul aR bR :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "[0,1,2,3] * [0,1,2,3]" [ 0.0, 1.0, 4.0, 9.0 ] (asArray1D f)
+  runManaged_ do
+    o <- allocate (ones [ 4 ] :: Effect (NDArray D1))
+    rng <- allocate (arange 0.0 4.0 1.0)
+    lift do
+      checkT "ones[4] + ones[4]" [ 2.0, 2.0, 2.0, 2.0 ] (lit o +. lit o)
+      checkT "[0,1,2,3] * [0,1,2,3]" [ 0.0, 1.0, 4.0, 9.0 ] (lit rng *. lit rng)
 
 testMatmulShape :: Effect Unit
 testMatmulShape = do
   log "matmul:"
-  runManaged
-    ( do
-        a <- allocate (zeros [ 2, 3 ] :: Effect (NDArray D2))
-        b <- allocate (ones [ 3, 4 ] :: Effect (NDArray D2))
-        aR <- lift (ref a)
-        bR <- lift (ref b)
-        allocate (matmul aR bR :: Effect (NDArray D2))
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "zeros[2,3] @ ones[3,4] shape" [ 2, 4 ] s
+  runManaged_ do
+    a <- allocate (zeros [ 2, 3 ] :: Effect (NDArray D2))
+    b <- allocate (ones [ 3, 4 ] :: Effect (NDArray D2))
+    lift $ checkShape "zeros[2,3] @ ones[3,4] shape" [ 2, 4 ]
+      (lit a **. lit b)
 
 testReductions :: Effect Unit
 testReductions = do
   log "reductions:"
-  runManaged
-    ( do
-        a <- allocate (ones [ 10 ] :: Effect (NDArray D1))
-        aR <- lift (ref a)
-        allocate (mean aR :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseNum "mean(ones[10])" 1.0 (asNumber f)
-  runManaged
-    ( do
-        a <- allocate (ones [ 5 ] :: Effect (NDArray D1))
-        aR <- lift (ref a)
-        allocate (sum aR :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseNum "sum(ones[5])" 5.0 (asNumber f)
+  -- `Core.mean` / `Core.sum` reduce over all axes (rank-0 result).
+  -- Tensor DSL's `meanAxisKeepT` reduces a single axis with keepdims,
+  -- so it's not the same op — drop down to Core directly here.
+  runManaged_ do
+    o10 <- allocate (ones [ 10 ] :: Effect (NDArray D1))
+    o10R <- lift (ref o10)
+    m <- allocate (mean o10R :: Effect (NDArray D1))
+    o5 <- allocate (ones [ 5 ] :: Effect (NDArray D1))
+    o5R <- lift (ref o5)
+    s <- allocate (sum o5R :: Effect (NDArray D1))
+    lift do
+      f1 <- toJs m
+      assertCloseNum "mean(ones[10])" 1.0 (asNumber f1)
+      f2 <- toJs s
+      assertCloseNum "sum(ones[5])" 5.0 (asNumber f2)
 
 testTranspose :: Effect Unit
 testTranspose = do
   log "transpose:"
-  runManaged
-    ( do
-        a <- allocate (zeros [ 2, 3 ] :: Effect (NDArray D2))
-        aR <- lift (ref a)
-        allocate (transpose aR :: Effect (NDArray D2))
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "transpose [2,3] -> [3,2]" [ 3, 2 ] s
+  runManaged_ do
+    a <- allocate (zeros [ 2, 3 ] :: Effect (NDArray D2))
+    lift $ checkShape "transpose [2,3] -> [3,2]" [ 3, 2 ]
+      (T.transposeT (lit a))
 
 testManagedScope :: Effect Unit
 testManagedScope = do
@@ -290,17 +302,11 @@ testManagedScope = do
   -- (run in a fresh scope below) is the implicit signal.
   runManaged (allocate (zeros [ 8, 8 ] :: Effect (NDArray D2))) \_ ->
     log "  ✓ runManaged completes scope cleanly"
-  runManaged
-    ( do
-        a <- allocate (ones [ 4, 4 ] :: Effect (NDArray D2))
-        b <- allocate (ones [ 4, 4 ] :: Effect (NDArray D2))
-        aR <- lift (ref a)
-        bR <- lift (ref b)
-        allocate (matmul aR bR :: Effect (NDArray D2))
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "subsequent allocation reuses cleaned-up backend" [ 4, 4 ] s
+  runManaged_ do
+    a <- allocate (ones [ 4, 4 ] :: Effect (NDArray D2))
+    b <- allocate (ones [ 4, 4 ] :: Effect (NDArray D2))
+    lift $ checkShape "subsequent allocation reuses cleaned-up backend"
+      [ 4, 4 ] (lit a **. lit b)
 
 testRMSNorm :: Effect Unit
 testRMSNorm = do
@@ -1361,4 +1367,21 @@ testSafetensors = do
       assertEqArrayInt "safetensors weight shape [2,2]" [ 2, 2 ] s
       assertCloseArray "safetensors weight values"
         [ 1.0, 2.0, 3.0, 4.0 ]
+        (asArray1D f)
+  -- BF16 promotion: TinyLlama-shaped fixture with one BF16 tensor.
+  -- Values [1.0, 2.0, -1.0, 0.5] encoded as the high 16 bits of their
+  -- F32 representations. Promotion should round-trip exactly because
+  -- BF16 is the high bits of F32 — no rounding for these targets.
+  bf16Fix <- makeBF16Fixture
+  bf16Parsed <- ST.parseSafetensors bf16Fix
+  bf16Names <- ST.tensorNames bf16Parsed
+  assertEqArrayInt "BF16 safetensors tensor count" [ 1 ] [ length bf16Names ]
+  runManaged_ do
+    w <- allocate (ST.getTensor bf16Parsed "w" :: Effect (NDArray D1))
+    lift do
+      s <- shape w
+      assertEqArrayInt "BF16 weight shape [4]" [ 4 ] s
+      f <- toJs w
+      assertCloseArray "BF16 → F32 promoted values"
+        [ 1.0, 2.0, -1.0, 0.5 ]
         (asArray1D f)
