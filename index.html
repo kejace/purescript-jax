@@ -28,6 +28,14 @@
         " · origin=" + window.location.origin;
     </script>
     <div class="row">
+      <label for="modelPreset">preset</label>
+      <select id="modelPreset">
+        <option value="smol" selected>Smol-Llama-101M (default · ~400 MB)</option>
+        <option value="tinyllama">TinyLlama-1.1B-Chat-v1.0 (~4.4 GB after BF16→F32)</option>
+        <option value="custom">custom URLs (edit fields below)</option>
+      </select>
+    </div>
+    <div class="row">
       <label for="weightsUrl">weights URL</label>
       <input id="weightsUrl" type="text" size="60"
         value="/local/smol-llama-101m/model.safetensors" />

@@ -96,6 +96,7 @@ main = do
   clearCacheBtn <- getElById "clearCache"
   weightsUrlEl <- getElById "weightsUrl"
   tokenizerUrlEl <- getElById "tokenizerUrl"
+  modelPresetEl <- getElById "modelPreset"
   loadStatusEl <- getElById "loadStatus"
   promptEl <- getElById "prompt"
   maxNewEl <- getElById "maxNew"
@@ -190,6 +191,20 @@ main = do
     setText statsEl "encoding…"
     postIn worker $ Generate
       { prompt: promptStr, maxNew, debug, sampling }
+  -- Preset dropdown: when changed, fill the URL fields with the
+  -- preset's stable local paths. Picking "custom" leaves them alone.
+  onChange modelPresetEl do
+    preset <- getValue modelPresetEl
+    case preset of
+      "smol" -> do
+        setText weightsUrlEl ""  -- clear before re-set so input change events fire
+        setText tokenizerUrlEl ""
+        setValue weightsUrlEl "/local/smol-llama-101m/model.safetensors"
+        setValue tokenizerUrlEl "/local/smol-llama-101m/tokenizer.model"
+      "tinyllama" -> do
+        setValue weightsUrlEl "/local/tinyllama-1.1b-chat/model.safetensors"
+        setValue tokenizerUrlEl "/local/tinyllama-1.1b-chat/tokenizer.model"
+      _ -> pure unit
   -- Wire the Load Model button (weights + tokenizer together).
   onClick loadBtn do
     setText loadStatusEl "starting…"
@@ -265,6 +280,23 @@ appendBenchRow body r = do
   setHtml body (current <> row)
 
 foreign import getInnerHtmlImpl :: Element -> Effect String
+
+-- | Set an `<input>` / `<select>` element's `value` property
+-- | (preserves event listeners; for `setText` the equivalent is
+-- | textContent which is wrong for form fields).
+foreign import setValueImpl :: EffectFn2 Element String Unit
+
+setValue :: Element -> String -> Effect Unit
+setValue = runEffectFn2 setValueImpl
+
+-- | Wire an "input changed" handler. For `<select>`, `change` fires
+-- | when the selected option changes; for text inputs, `input` is
+-- | usually preferable. This binding uses `change` because the only
+-- | current caller is the model-preset dropdown.
+foreign import onChangeImpl :: EffectFn2 Element (Effect Unit) Unit
+
+onChange :: Element -> Effect Unit -> Effect Unit
+onChange = runEffectFn2 onChangeImpl
 
 -- | Read a URL query parameter (returns `true` when present, regardless
 -- | of value — supports both `?debug` and `?debug=1`).
