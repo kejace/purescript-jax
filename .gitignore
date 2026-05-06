@@ -1,0 +1,12 @@
+node_modules/
+output/
+.spago/
+.psa-stash
+dist/
+public/dist/
+# Locally-staged model checkpoints (weights/tokenizer files are user-fetched).
+public/local/
+*.log
+.DS_Store
+# Claude / agent metadata.
+.claude/

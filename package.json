@@ -1,0 +1,27 @@
+{
+  "name": "purescript-jax",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "spago build",
+    "bundle": "spago bundle --bundle-type app --module Main --outfile public/dist/index.js",
+    "bundle:browser": "spago bundle --module Browser --outfile public/dist/browser.js --platform browser --bundle-type app --bundler-args=--format=esm",
+    "bundle:worker": "spago bundle --module Worker --outfile public/dist/worker.js --platform browser --bundle-type app --bundler-args=--format=esm",
+    "bundle:web": "bun run bundle:browser && bun run bundle:worker",
+    "dev": "bun run bundle:web && vite",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@jax-js/jax": "*",
+    "@jax-js/loaders": "^0.1.1",
+    "@jax-js/optax": "^0.1.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "esbuild": "^0.24.0",
+    "purescript": "^0.15.15",
+    "spago": "next",
+    "vite": "^5.4.0"
+  }
+}
