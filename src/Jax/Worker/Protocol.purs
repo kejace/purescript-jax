@@ -15,6 +15,7 @@
 module Jax.Worker.Protocol
   ( -- * Inbound (browser → worker)
     WorkerIn(..)
+  , SamplingParams
   , workerInCodec
   -- * Outbound (worker → browser)
   , WorkerOut(..)
@@ -41,6 +42,20 @@ import Data.Tuple (Tuple(..))
 -- Inbound — browser to worker
 -- =============================================================================
 
+-- | Sampling-strategy parameters. Carries all four parameter values
+-- | regardless of which mode is selected; the worker reads only the
+-- | ones relevant to `mode` and ignores the rest. Putting them in a
+-- | flat record keeps the codec trivial.
+-- |
+-- | `mode` ∈ {"greedy", "temperature", "topK", "topP"}.
+type SamplingParams =
+  { mode :: String
+  , temperature :: Number
+  , topK :: Int
+  , topP :: Number
+  , seed :: Int
+  }
+
 data WorkerIn
   = LoadModel
       { url :: String
@@ -50,6 +65,7 @@ data WorkerIn
       { prompt :: String
       , maxNew :: Int
       , debug :: Boolean
+      , sampling :: SamplingParams
       }
   | Benchmark
       { benchPrompt :: Array Int
@@ -85,11 +101,25 @@ loadModelPayload = CAR.object "LoadModel"
   , tokenizerUrl: CA.string
   }
 
-generatePayload :: JsonCodec { prompt :: String, maxNew :: Int, debug :: Boolean }
+samplingParamsCodec :: JsonCodec SamplingParams
+samplingParamsCodec = CAR.object "SamplingParams"
+  { mode: CA.string
+  , temperature: CA.number
+  , topK: CA.int
+  , topP: CA.number
+  , seed: CA.int
+  }
+
+generatePayload
+  :: JsonCodec
+       { prompt :: String, maxNew :: Int, debug :: Boolean
+       , sampling :: SamplingParams
+       }
 generatePayload = CAR.object "Generate"
   { prompt: CA.string
   , maxNew: CA.int
   , debug: CA.boolean
+  , sampling: samplingParamsCodec
   }
 
 benchmarkPayload :: JsonCodec { benchPrompt :: Array Int, maxNew :: Int }

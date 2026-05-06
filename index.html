@@ -51,6 +51,24 @@
       <label for="maxNew">max new tokens</label>
       <input id="maxNew" type="number" value="40" min="1" max="512" />
     </div>
+    <div class="row" style="font-size:0.92em">
+      <label for="samplingMode">sampling</label>
+      <select id="samplingMode">
+        <option value="greedy" selected>greedy (argmax)</option>
+        <option value="temperature">temperature</option>
+        <option value="topK">top-k + temperature</option>
+        <option value="topP">top-p + temperature</option>
+      </select>
+      &nbsp;
+      <label for="temperature" style="min-width:auto">T</label>
+      <input id="temperature" type="text" value="0.8" size="4" />
+      &nbsp;
+      <label for="topK" style="min-width:auto">k</label>
+      <input id="topK" type="number" value="40" min="1" max="2000" />
+      &nbsp;
+      <label for="topP" style="min-width:auto">p</label>
+      <input id="topP" type="text" value="0.9" size="4" />
+    </div>
     <div class="row">
       <button id="generate">generate</button>
       <button id="benchmark">benchmark all backends</button>

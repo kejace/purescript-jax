@@ -23,6 +23,11 @@ module Jax.NN.Generate
   , StopCond
   , decodeLoop
   , decodeLoopWithHead
+  -- * Sampler builders (re-keyable for external composition)
+  , greedySamplerExternal
+  , temperatureSamplerExternal
+  , topKSamplerExternal
+  , topPSamplerExternal
   -- * Helpers
   , withLastRow
   -- * Pre-baked recipes
@@ -243,6 +248,20 @@ topPSampler key p temp = Sampler \logits -> do
   ks <- splitKey2 key
   token <- sampleTopP ks.a p temp logits
   pure { token, next: topPSampler ks.b p temp }
+
+-- | Public re-exports of the four sampler builders — the worker uses
+-- | these when assembling a sampler from a `SamplingParams` record.
+greedySamplerExternal :: Sampler
+greedySamplerExternal = greedy
+
+temperatureSamplerExternal :: Key -> Number -> Sampler
+temperatureSamplerExternal = temperatureSampler
+
+topKSamplerExternal :: Key -> Int -> Number -> Sampler
+topKSamplerExternal = topKSampler
+
+topPSamplerExternal :: Key -> Number -> Number -> Sampler
+topPSamplerExternal = topPSampler
 
 -- =============================================================================
 -- Pre-baked generation recipes

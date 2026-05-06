@@ -106,6 +106,10 @@ main = do
   trainBtn <- getElById "trainSynthetic"
   trainStepsEl <- getElById "trainSteps"
   trainLREl <- getElById "trainLR"
+  samplingModeEl <- getElById "samplingMode"
+  temperatureEl <- getElById "temperature"
+  topKEl <- getElById "topK"
+  topPEl <- getElById "topP"
   setText backendEl "spawning worker…"
   -- Wire incoming messages from the worker.
   onMessageRaw worker \raw -> case decodeStr workerOutCodec raw of
@@ -167,10 +171,25 @@ main = do
     maxNewStr <- getValue maxNewEl
     let maxNew = fromMaybe 40 (fromString maxNewStr)
     debug <- hasUrlParamImpl "debug"
+    -- Read sampling controls. Defaults are conservative greedy-equivalent:
+    --   mode = greedy  → ignores the rest entirely
+    --   temperature 0.8, topK 40, topP 0.9 if user picked a sampling mode
+    samplingMode <- getValue samplingModeEl
+    tempStr <- getValue temperatureEl
+    topKStr <- getValue topKEl
+    topPStr <- getValue topPEl
+    let
+      sampling =
+        { mode: samplingMode
+        , temperature: fromMaybe 0.8 (Number.fromString tempStr)
+        , topK: fromMaybe 40 (fromString topKStr)
+        , topP: fromMaybe 0.9 (Number.fromString topPStr)
+        , seed: 42  -- TODO: expose if reproducibility is needed
+        }
     setText outputEl promptStr
     setText statsEl "encoding…"
     postIn worker $ Generate
-      { prompt: promptStr, maxNew, debug }
+      { prompt: promptStr, maxNew, debug, sampling }
   -- Wire the Load Model button (weights + tokenizer together).
   onClick loadBtn do
     setText loadStatusEl "starting…"

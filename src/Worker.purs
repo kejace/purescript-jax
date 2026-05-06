@@ -28,12 +28,13 @@ import Jax.Loaders.SentencePieceBPE as SBPE
 import Jax.Managed (Managed, allocate, runManaged)
 import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights, emptyKVCacheStack, forwardCachedWithHead)
 import Jax.NN.Generate
-  ( generateGreedyCachedStream
-  , generateGreedyCachedStreamUntilWithHead
+  ( generateGreedyCached
+  , generateGreedyCachedStream
   )
+import Jax.NN.Generate as Generate
 import Jax.NN.RoPE (RoPETables, precomputeRoPE)
 import Jax.NN.Train (makeCrossEntropyLoss)
-import Jax.NN.Generate (generateGreedyCached)
+import Jax.Random as Random
 import Jax.Optax as Optax
 import Jax.Autodiff (valueAndGradT)
 import Jax.Pytree (countParams, countTensors, sumSquaredL2)
@@ -41,7 +42,8 @@ import Data.Traversable (traverse)
 import Data.Number as Math
 import Unsafe.Coerce (unsafeCoerce)
 import Jax.Worker.Protocol
-  ( WorkerIn(..)
+  ( SamplingParams
+  , WorkerIn(..)
   , WorkerOut(..)
   , decodeStr
   , encodeStr
@@ -125,7 +127,7 @@ main = do
     Left err -> log $ "[worker] decode error: " <> err
     Right msg -> case msg of
       LoadModel r -> handleLoadModel modelRef r.url r.tokenizerUrl
-      Generate r -> handleGenerate modelRef r.prompt r.maxNew r.debug
+      Generate r -> handleGenerate modelRef r.prompt r.maxNew r.debug r.sampling
       Benchmark r -> handleBenchmark r.benchPrompt r.maxNew
       TrainSynthetic r -> handleTrainSynthetic r.steps r.learningRate
 
@@ -247,17 +249,28 @@ replace search replacement input = runFn3 replaceImpl search replacement input
 -- Generate -------------------------------------------------------------------
 
 handleGenerate
-  :: Ref (Maybe LoadedModel) -> String -> Int -> Boolean -> Effect Unit
-handleGenerate modelRef prompt maxNew debug = do
+  :: Ref (Maybe LoadedModel)
+  -> String
+  -> Int
+  -> Boolean
+  -> SamplingParams
+  -> Effect Unit
+handleGenerate modelRef prompt maxNew debug sampling = do
   loaded <- Ref.read modelRef
   case loaded of
     Nothing ->
       post $ GenerateError
         { err: "no model loaded — click \"load model\" first" }
-    Just lm -> generateText lm prompt maxNew debug
+    Just lm -> generateText lm prompt maxNew debug sampling
 
-generateText :: LoadedModel -> String -> Int -> Boolean -> Effect Unit
-generateText lm prompt maxNew debug = do
+generateText
+  :: LoadedModel
+  -> String
+  -> Int
+  -> Boolean
+  -> SamplingParams
+  -> Effect Unit
+generateText lm prompt maxNew debug sampling = do
   promptIds <- SBPE.encode lm.tokenizer prompt
   let
     eos = SBPE.eosToken lm.tokenizer
@@ -294,8 +307,25 @@ generateText lm prompt maxNew debug = do
             else fullText
       Ref.write fullText prevTextRef
       post $ TokenText { value: t, text: suffix, isEos: t == eos }
-  generateGreedyCachedStreamUntilWithHead
-    lm.cfg lm.weights lm.lmHead lm.rope (Just eos) promptIdsBos maxNew onTok
+  -- Build the sampler from the requested mode. Each Sampler-keyed
+  -- variant splits an internal PRNG key on every step (see
+  -- Generate.purs). Greedy ignores keys.
+  sampler <- case sampling.mode of
+    "temperature" -> do
+      key <- Random.mkKey sampling.seed
+      pure (Generate.temperatureSamplerExternal key sampling.temperature)
+    "topK" -> do
+      key <- Random.mkKey sampling.seed
+      pure (Generate.topKSamplerExternal key sampling.topK sampling.temperature)
+    "topP" -> do
+      key <- Random.mkKey sampling.seed
+      pure (Generate.topPSamplerExternal key sampling.topP sampling.temperature)
+    _ -> pure Generate.greedySamplerExternal
+  let
+    stopFn t = t == eos
+  _ <- Generate.decodeLoopWithHead
+    lm.cfg lm.weights lm.lmHead lm.rope sampler onTok stopFn promptIdsBos maxNew
+  pure unit
   end <- performanceNow
   prefillEnd <- Ref.read prefillEndRef
   count <- Ref.read countRef
