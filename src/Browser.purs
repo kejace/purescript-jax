@@ -3,6 +3,7 @@ module Browser where
 import Prelude
 
 import Data.Array (intercalate)
+import Data.Either (Either(..))
 import Data.Int (fromString)
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String (split, trim)
@@ -16,8 +17,14 @@ import Effect.Uncurried
   , runEffectFn1
   , runEffectFn2
   )
-import Foreign (Foreign)
-import Unsafe.Coerce (unsafeCoerce)
+import Jax.Worker.Protocol
+  ( WorkerIn(..)
+  , WorkerOut(..)
+  , decodeStr
+  , encodeStr
+  , workerInCodec
+  , workerOutCodec
+  )
 
 -- Default benchmark prompt: matches the previous synthetic vocab.
 defaultBenchPrompt :: Array Int
@@ -37,8 +44,8 @@ foreign import setHtmlImpl :: EffectFn2 Element String Unit
 foreign import setStyleDisplayImpl :: EffectFn2 Element String Unit
 
 foreign import mkWorkerImpl :: EffectFn1 String Worker
-foreign import postMessageImpl :: forall a. EffectFn2 Worker a Unit
-foreign import onMessageImpl :: EffectFn2 Worker (Foreign -> Effect Unit) Unit
+foreign import postMessageImpl :: EffectFn2 Worker String Unit
+foreign import onMessageImpl :: EffectFn2 Worker (String -> Effect Unit) Unit
 
 getElById :: String -> Effect Element
 getElById = runEffectFn1 getElByIdImpl
@@ -64,11 +71,15 @@ setStyleDisplay = runEffectFn2 setStyleDisplayImpl
 mkWorker :: String -> Effect Worker
 mkWorker = runEffectFn1 mkWorkerImpl
 
-postMessage :: forall a. Worker -> a -> Effect Unit
-postMessage = runEffectFn2 postMessageImpl
+postMessageRaw :: Worker -> String -> Effect Unit
+postMessageRaw = runEffectFn2 postMessageImpl
 
-onMessage :: Worker -> (Foreign -> Effect Unit) -> Effect Unit
-onMessage = runEffectFn2 onMessageImpl
+-- | Encode a `WorkerIn` and post it.
+postIn :: Worker -> WorkerIn -> Effect Unit
+postIn worker msg = postMessageRaw worker (encodeStr workerInCodec msg)
+
+onMessageRaw :: Worker -> (String -> Effect Unit) -> Effect Unit
+onMessageRaw = runEffectFn2 onMessageImpl
 
 -- Main entry -----------------------------------------------------------------
 
@@ -93,64 +104,42 @@ main = do
   benchBody <- getElById "benchBody"
   setText backendEl "spawning worker…"
   -- Wire incoming messages from the worker.
-  onMessage worker \msg -> do
-    let
-      m = unsafeCoerce msg ::
-        { kind :: String
-        , backend :: String
-        , value :: Int
-        , text :: String
-        , isEos :: Boolean
-        , count :: Int
-        , ok :: Boolean
-        , prefillMs :: Number
-        , decodeMs :: Number
-        , totalMs :: Number
-        , tensorCount :: Int
-        , fetchMs :: Number
-        , parseMs :: Number
-        , vocabSize :: Int
-        , promptTokens :: Int
-        , stoppedAtEos :: Boolean
-        , url :: String
-        , err :: String
-        }
-      showMs :: Number -> String
-      showMs = toFixed1
-    case m.kind of
-      "ready" -> do
-        setText backendEl m.backend
-        log $ "[browser] worker ready on " <> m.backend
-      "tokenText" ->
-        if m.isEos then pure unit  -- hide the EOS marker from rendered output
-        else appendText outputEl m.text
-      "generateStart" ->
-        setText statsEl ("encoded " <> show m.promptTokens <> " prompt tokens · running…")
-      "generateError" -> do
-        setText statsEl ("error: " <> m.err)
+  onMessageRaw worker \raw -> case decodeStr workerOutCodec raw of
+    Left err -> log $ "[browser] decode error: " <> err <> " (raw: " <> raw <> ")"
+    Right msg -> case msg of
+      Ready r -> do
+        setText backendEl r.backend
+        log $ "[browser] worker ready on " <> r.backend
+      TokenText r ->
+        if r.isEos then pure unit
+        else appendText outputEl r.text
+      GenerateStart r ->
+        setText statsEl ("encoded " <> show r.promptTokens <> " prompt tokens · running…")
+      GenerateError r -> do
+        setText statsEl ("error: " <> r.err)
         setText outputEl ""
-      "done" -> do
+      Done r -> do
         let
-          stop = if m.stoppedAtEos then " · stopped at EOS" else ""
-          msg' = "generated " <> show m.count <> " tokens · "
-            <> "prefill " <> toFixed1 m.prefillMs <> " ms · "
-            <> "decode " <> toFixed1 m.decodeMs <> " ms · "
-            <> "total " <> toFixed1 m.totalMs <> " ms · "
-            <> showTps m.count m.totalMs <> " tok/s" <> stop
+          stop = if r.stoppedAtEos then " · stopped at EOS" else ""
+          msg' = "generated " <> show r.count <> " tokens · "
+            <> "prefill " <> toFixed1 r.prefillMs <> " ms · "
+            <> "decode " <> toFixed1 r.decodeMs <> " ms · "
+            <> "total " <> toFixed1 r.totalMs <> " ms · "
+            <> showTps r.count r.totalMs <> " tok/s" <> stop
         setText statsEl msg'
-      "benchResult" -> appendBenchRow benchBody m
-      "benchmarkDone" -> setText statsEl "benchmark complete"
-      "loadStart" -> setText loadStatusEl ("fetching " <> m.url <> "…")
-      "loadTokenizer" -> setText loadStatusEl
-        ("tokenizer ready (vocab " <> show m.vocabSize <> ") · fetching weights…")
-      "loadFetched" -> setText loadStatusEl
-        ("fetched in " <> showMs m.fetchMs <> " ms · parsing…")
-      "loadDone" -> setText loadStatusEl
-        ( "loaded " <> show m.tensorCount <> " tensors · "
-            <> "fetch+parse total " <> showMs m.totalMs <> " ms"
+      BenchResult r -> appendBenchRow benchBody r
+      BenchmarkDone -> setText statsEl "benchmark complete"
+      LoadStart r -> setText loadStatusEl ("fetching " <> r.url <> "…")
+      LoadConfigMsg _ -> pure unit
+      LoadTokenizer r -> setText loadStatusEl
+        ("tokenizer ready (vocab " <> show r.vocabSize <> ") · fetching weights…")
+      LoadFetched r -> setText loadStatusEl
+        ("fetched in " <> toFixed1 r.fetchMs <> " ms · parsing…")
+      LoadDone r -> setText loadStatusEl
+        ( "loaded " <> show r.tensorCount <> " tensors · "
+            <> "fetch+parse total " <> toFixed1 r.totalMs <> " ms"
         )
-      "loadError" -> setText loadStatusEl ("load failed: " <> m.err)
-      _ -> log $ "[browser] unknown message: " <> m.kind
+      LoadError r -> setText loadStatusEl ("load failed: " <> r.err)
   -- Wire the Generate button.
   onClick generateBtn do
     setStyleDisplay benchTable "none"
@@ -158,31 +147,23 @@ main = do
     maxNewStr <- getValue maxNewEl
     let maxNew = fromMaybe 40 (fromString maxNewStr)
     debug <- hasUrlParamImpl "debug"
-    -- Render the prompt as the visible head of the output, then stream
-    -- generated text into the same element.
     setText outputEl promptStr
     setText statsEl "encoding…"
-    postMessage worker
-      { kind: "generate"
-      , prompt: promptStr
-      , maxNew
-      , debug
-      }
+    postIn worker $ Generate
+      { prompt: promptStr, maxNew, debug }
   -- Wire the Load Model button (weights + tokenizer together).
   onClick loadBtn do
     setText loadStatusEl "starting…"
     url <- getValue weightsUrlEl
     tokenizerUrl <- getValue tokenizerUrlEl
-    postMessage worker
-      { kind: "loadModel", url, tokenizerUrl }
+    postIn worker $ LoadModel { url, tokenizerUrl }
   -- Wire the Clear Cache button.
   onClick clearCacheBtn do
     setText loadStatusEl "clearing OPFS cache…"
     clearOpfs
       (\n -> setText loadStatusEl ("cache cleared (" <> show n <> " entries)"))
       (\err -> setText loadStatusEl ("cache clear failed: " <> err))
-  -- Wire the Benchmark button. Always uses the synthetic model on a
-  -- fixed token prompt — no tokenizer/weights required.
+  -- Wire the Benchmark button. Always uses the synthetic model.
   onClick benchmarkBtn do
     setText outputEl ""
     setText statsEl "benchmarking…"
@@ -190,11 +171,8 @@ main = do
     setStyleDisplay benchTable "table"
     maxNewStr <- getValue maxNewEl
     let maxNew = fromMaybe 10 (fromString maxNewStr)
-    postMessage worker
-      { kind: "benchmark"
-      , benchPrompt: defaultBenchPrompt
-      , maxNew
-      }
+    postIn worker $ Benchmark
+      { benchPrompt: defaultBenchPrompt, maxNew }
 
 -- Helpers --------------------------------------------------------------------
 
@@ -215,11 +193,10 @@ showTps count totalMs =
 
 -- Append a row to the benchmark table.
 appendBenchRow
-  :: forall r
-   . Element
+  :: Element
   -> { backend :: String, ok :: Boolean, count :: Int
      , prefillMs :: Number, decodeMs :: Number, totalMs :: Number
-     | r }
+     }
   -> Effect Unit
 appendBenchRow body r = do
   current <- getInnerHtmlImpl body

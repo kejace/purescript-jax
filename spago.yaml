@@ -1,17 +1,19 @@
 package:
   name: jax
   dependencies:
-    - prelude
-    - effect
-    - console
-    - functions
-    - exceptions
-    - maybe
-    - tuples
+    - argonaut-core
     - arrays
+    - codec-argonaut
+    - console
+    - effect
     - either
+    - exceptions
     - foreign
+    - functions
+    - maybe
+    - prelude
     - transformers
+    - tuples
   test:
     main: Test.Main
     dependencies: []

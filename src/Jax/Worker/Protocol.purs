@@ -1,0 +1,283 @@
+-- | Type-safe message protocol between the browser-thread Browser and
+-- | the dedicated Worker. Both sides import this module; the wire
+-- | format is a JSON string. The codec values handle ser/de and
+-- | give clear failure messages when a field is missing or wrong-typed.
+-- |
+-- | Wire format: `{ "tag": "Generate", "value": { ... } }` (taggedSum
+-- | convention). Compared to the old `{ "kind": "...", ...rest }`
+-- | god-object record, this:
+-- |   * makes invalid messages fail at the codec boundary, not deep
+-- |     inside a handler that did `unsafeCoerce`,
+-- |   * enforces exhaustiveness on both sides — adding a constructor
+-- |     here is a compile error in any module that pattern-matches it,
+-- |   * survives field renames (you change the codec; PS catches the
+-- |     mismatch).
+module Jax.Worker.Protocol
+  ( -- * Inbound (browser → worker)
+    WorkerIn(..)
+  , workerInCodec
+  -- * Outbound (worker → browser)
+  , WorkerOut(..)
+  , workerOutCodec
+  -- * Helpers
+  , encodeStr
+  , decodeStr
+  ) where
+
+import Prelude
+
+import Data.Argonaut.Core (Json, stringify)
+import Data.Argonaut.Parser (jsonParser)
+import Data.Bifunctor (lmap)
+import Data.Codec.Argonaut (JsonCodec, JsonDecodeError(..), printJsonDecodeError)
+import Data.Codec.Argonaut as CA
+import Data.Codec.Argonaut.Record as CAR
+import Data.Codec.Argonaut.Sum as CAS
+import Data.Either (Either(..))
+import Data.Maybe (Maybe(..))
+import Data.Tuple (Tuple(..))
+
+-- =============================================================================
+-- Inbound — browser to worker
+-- =============================================================================
+
+data WorkerIn
+  = LoadModel
+      { url :: String
+      , tokenizerUrl :: String
+      }
+  | Generate
+      { prompt :: String
+      , maxNew :: Int
+      , debug :: Boolean
+      }
+  | Benchmark
+      { benchPrompt :: Array Int
+      , maxNew :: Int
+      }
+
+derive instance Eq WorkerIn
+
+data WorkerInTag = TagLoadModel | TagGenerate | TagBenchmark
+
+printIn :: WorkerInTag -> String
+printIn = case _ of
+  TagLoadModel -> "loadModel"
+  TagGenerate -> "generate"
+  TagBenchmark -> "benchmark"
+
+parseIn :: String -> Maybe WorkerInTag
+parseIn = case _ of
+  "loadModel" -> Just TagLoadModel
+  "generate" -> Just TagGenerate
+  "benchmark" -> Just TagBenchmark
+  _ -> Nothing
+
+loadModelPayload :: JsonCodec { url :: String, tokenizerUrl :: String }
+loadModelPayload = CAR.object "LoadModel"
+  { url: CA.string
+  , tokenizerUrl: CA.string
+  }
+
+generatePayload :: JsonCodec { prompt :: String, maxNew :: Int, debug :: Boolean }
+generatePayload = CAR.object "Generate"
+  { prompt: CA.string
+  , maxNew: CA.int
+  , debug: CA.boolean
+  }
+
+benchmarkPayload :: JsonCodec { benchPrompt :: Array Int, maxNew :: Int }
+benchmarkPayload = CAR.object "Benchmark"
+  { benchPrompt: CA.array CA.int
+  , maxNew: CA.int
+  }
+
+workerInCodec :: JsonCodec WorkerIn
+workerInCodec = CAS.taggedSum "WorkerIn" printIn parseIn fromIn toIn
+  where
+  fromIn = case _ of
+    TagLoadModel -> Right (map LoadModel <<< CA.decode loadModelPayload)
+    TagGenerate -> Right (map Generate <<< CA.decode generatePayload)
+    TagBenchmark -> Right (map Benchmark <<< CA.decode benchmarkPayload)
+
+  toIn = case _ of
+    LoadModel r -> Tuple TagLoadModel (Just (CA.encode loadModelPayload r))
+    Generate r -> Tuple TagGenerate (Just (CA.encode generatePayload r))
+    Benchmark r -> Tuple TagBenchmark (Just (CA.encode benchmarkPayload r))
+
+-- =============================================================================
+-- Outbound — worker to browser
+-- =============================================================================
+
+data WorkerOut
+  = Ready { backend :: String }
+  | LoadStart { url :: String }
+  | LoadConfigMsg { hidden :: Int, nHeads :: Int, nKvHeads :: Int, nLayers :: Int, vocab :: Int }
+  | LoadTokenizer { vocabSize :: Int }
+  | LoadFetched { url :: String, fetchMs :: Number }
+  | LoadDone
+      { url :: String
+      , tensorCount :: Int
+      , parseMs :: Number
+      , adaptMs :: Number
+      , totalMs :: Number
+      }
+  | LoadError { url :: String, err :: String }
+  | GenerateStart { promptIds :: Array Int, promptTokens :: Int }
+  | GenerateError { err :: String }
+  | TokenText { value :: Int, text :: String, isEos :: Boolean }
+  | Done
+      { count :: Int
+      , prefillMs :: Number
+      , decodeMs :: Number
+      , totalMs :: Number
+      , text :: String
+      , stoppedAtEos :: Boolean
+      }
+  | BenchResult
+      { backend :: String
+      , ok :: Boolean
+      , count :: Int
+      , prefillMs :: Number
+      , decodeMs :: Number
+      , totalMs :: Number
+      }
+  | BenchmarkDone
+
+derive instance Eq WorkerOut
+
+data WorkerOutTag
+  = TagReady | TagLoadStart | TagLoadConfig | TagLoadTokenizer | TagLoadFetched
+  | TagLoadDone | TagLoadError | TagGenerateStart | TagGenerateError | TagTokenText
+  | TagDone | TagBenchResult | TagBenchmarkDone
+
+printOut :: WorkerOutTag -> String
+printOut = case _ of
+  TagReady -> "ready"
+  TagLoadStart -> "loadStart"
+  TagLoadConfig -> "loadConfig"
+  TagLoadTokenizer -> "loadTokenizer"
+  TagLoadFetched -> "loadFetched"
+  TagLoadDone -> "loadDone"
+  TagLoadError -> "loadError"
+  TagGenerateStart -> "generateStart"
+  TagGenerateError -> "generateError"
+  TagTokenText -> "tokenText"
+  TagDone -> "done"
+  TagBenchResult -> "benchResult"
+  TagBenchmarkDone -> "benchmarkDone"
+
+parseOut :: String -> Maybe WorkerOutTag
+parseOut = case _ of
+  "ready" -> Just TagReady
+  "loadStart" -> Just TagLoadStart
+  "loadConfig" -> Just TagLoadConfig
+  "loadTokenizer" -> Just TagLoadTokenizer
+  "loadFetched" -> Just TagLoadFetched
+  "loadDone" -> Just TagLoadDone
+  "loadError" -> Just TagLoadError
+  "generateStart" -> Just TagGenerateStart
+  "generateError" -> Just TagGenerateError
+  "tokenText" -> Just TagTokenText
+  "done" -> Just TagDone
+  "benchResult" -> Just TagBenchResult
+  "benchmarkDone" -> Just TagBenchmarkDone
+  _ -> Nothing
+
+readyP :: JsonCodec { backend :: String }
+readyP = CAR.object "Ready" { backend: CA.string }
+
+loadStartP :: JsonCodec { url :: String }
+loadStartP = CAR.object "LoadStart" { url: CA.string }
+
+loadConfigP :: JsonCodec { hidden :: Int, nHeads :: Int, nKvHeads :: Int, nLayers :: Int, vocab :: Int }
+loadConfigP = CAR.object "LoadConfig"
+  { hidden: CA.int, nHeads: CA.int, nKvHeads: CA.int, nLayers: CA.int, vocab: CA.int }
+
+loadTokenizerP :: JsonCodec { vocabSize :: Int }
+loadTokenizerP = CAR.object "LoadTokenizer" { vocabSize: CA.int }
+
+loadFetchedP :: JsonCodec { url :: String, fetchMs :: Number }
+loadFetchedP = CAR.object "LoadFetched" { url: CA.string, fetchMs: CA.number }
+
+loadDoneP :: JsonCodec
+  { url :: String, tensorCount :: Int, parseMs :: Number, adaptMs :: Number, totalMs :: Number }
+loadDoneP = CAR.object "LoadDone"
+  { url: CA.string, tensorCount: CA.int, parseMs: CA.number
+  , adaptMs: CA.number, totalMs: CA.number }
+
+loadErrorP :: JsonCodec { url :: String, err :: String }
+loadErrorP = CAR.object "LoadError" { url: CA.string, err: CA.string }
+
+generateStartP :: JsonCodec { promptIds :: Array Int, promptTokens :: Int }
+generateStartP = CAR.object "GenerateStart"
+  { promptIds: CA.array CA.int, promptTokens: CA.int }
+
+generateErrorP :: JsonCodec { err :: String }
+generateErrorP = CAR.object "GenerateError" { err: CA.string }
+
+tokenTextP :: JsonCodec { value :: Int, text :: String, isEos :: Boolean }
+tokenTextP = CAR.object "TokenText"
+  { value: CA.int, text: CA.string, isEos: CA.boolean }
+
+doneP :: JsonCodec
+  { count :: Int, prefillMs :: Number, decodeMs :: Number, totalMs :: Number
+  , text :: String, stoppedAtEos :: Boolean }
+doneP = CAR.object "Done"
+  { count: CA.int, prefillMs: CA.number, decodeMs: CA.number, totalMs: CA.number
+  , text: CA.string, stoppedAtEos: CA.boolean }
+
+benchResultP :: JsonCodec
+  { backend :: String, ok :: Boolean, count :: Int
+  , prefillMs :: Number, decodeMs :: Number, totalMs :: Number }
+benchResultP = CAR.object "BenchResult"
+  { backend: CA.string, ok: CA.boolean, count: CA.int
+  , prefillMs: CA.number, decodeMs: CA.number, totalMs: CA.number }
+
+workerOutCodec :: JsonCodec WorkerOut
+workerOutCodec = CAS.taggedSum "WorkerOut" printOut parseOut fromOut toOut
+  where
+  fromOut = case _ of
+    TagReady -> Right (map Ready <<< CA.decode readyP)
+    TagLoadStart -> Right (map LoadStart <<< CA.decode loadStartP)
+    TagLoadConfig -> Right (map LoadConfigMsg <<< CA.decode loadConfigP)
+    TagLoadTokenizer -> Right (map LoadTokenizer <<< CA.decode loadTokenizerP)
+    TagLoadFetched -> Right (map LoadFetched <<< CA.decode loadFetchedP)
+    TagLoadDone -> Right (map LoadDone <<< CA.decode loadDoneP)
+    TagLoadError -> Right (map LoadError <<< CA.decode loadErrorP)
+    TagGenerateStart -> Right (map GenerateStart <<< CA.decode generateStartP)
+    TagGenerateError -> Right (map GenerateError <<< CA.decode generateErrorP)
+    TagTokenText -> Right (map TokenText <<< CA.decode tokenTextP)
+    TagDone -> Right (map Done <<< CA.decode doneP)
+    TagBenchResult -> Right (map BenchResult <<< CA.decode benchResultP)
+    TagBenchmarkDone -> Left BenchmarkDone
+
+  toOut = case _ of
+    Ready r -> Tuple TagReady (Just (CA.encode readyP r))
+    LoadStart r -> Tuple TagLoadStart (Just (CA.encode loadStartP r))
+    LoadConfigMsg r -> Tuple TagLoadConfig (Just (CA.encode loadConfigP r))
+    LoadTokenizer r -> Tuple TagLoadTokenizer (Just (CA.encode loadTokenizerP r))
+    LoadFetched r -> Tuple TagLoadFetched (Just (CA.encode loadFetchedP r))
+    LoadDone r -> Tuple TagLoadDone (Just (CA.encode loadDoneP r))
+    LoadError r -> Tuple TagLoadError (Just (CA.encode loadErrorP r))
+    GenerateStart r -> Tuple TagGenerateStart (Just (CA.encode generateStartP r))
+    GenerateError r -> Tuple TagGenerateError (Just (CA.encode generateErrorP r))
+    TokenText r -> Tuple TagTokenText (Just (CA.encode tokenTextP r))
+    Done r -> Tuple TagDone (Just (CA.encode doneP r))
+    BenchResult r -> Tuple TagBenchResult (Just (CA.encode benchResultP r))
+    BenchmarkDone -> Tuple TagBenchmarkDone Nothing
+
+-- =============================================================================
+-- String helpers
+-- =============================================================================
+
+-- | Encode any codec'd value to a JSON string.
+encodeStr :: forall a. JsonCodec a -> a -> String
+encodeStr codec a = stringify (CA.encode codec a)
+
+-- | Parse and decode a JSON string. Combines `jsonParser` + the
+-- | supplied codec. Errors are reported as human-readable strings.
+decodeStr :: forall a. JsonCodec a -> String -> Either String a
+decodeStr codec s = do
+  json <- jsonParser s
+  lmap printJsonDecodeError (CA.decode codec json)

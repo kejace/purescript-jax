@@ -1,6 +1,6 @@
 // Worker-side FFI: self.onmessage / self.postMessage.
-// Both bound as EffectFn1 — the JS form is `(arg) => result` (no extra
-// thunk wrapper).
+//
+// Wire format: JSON strings (the PS-side codec handles ser/de).
 
 export const selfOnMessageImpl = (cb) => {
   self.onmessage = (e) => cb(e.data)();
