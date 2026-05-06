@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>purescript-jax browser demo</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23246'/%3E%3Ctext x='50%25' y='62%25' font-family='ui-monospace,monospace' font-size='18' font-weight='700' fill='%23fff' text-anchor='middle'%3Eλ%3C/text%3E%3C/svg%3E" />
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; }
+      .row { margin: 0.6em 0; }
+      label { display: inline-block; min-width: 8em; }
+      input[type="text"], input[type="number"] { font: inherit; padding: 0.2em 0.4em; }
+      #output, #stats { font-family: ui-monospace, monospace; padding: 0.4em 0.6em; background: #f6f6f6; border-radius: 4px; min-height: 1.4em; word-break: break-all; }
+      #stats { margin-top: 0.6em; color: #555; }
+      .backend { font-weight: 600; color: #246; }
+      button { font: inherit; padding: 0.3em 0.8em; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <h1>purescript-jax</h1>
+    <div class="row" id="isolation" style="font-family:ui-monospace,monospace;font-size:0.85em;color:#666;"></div>
+    <div class="row">backend: <span id="backend" class="backend">…</span></div>
+    <script>
+      // Diagnostic: surface cross-origin isolation state and SAB availability.
+      const el = document.getElementById("isolation");
+      el.textContent =
+        "crossOriginIsolated=" + (typeof crossOriginIsolated === "boolean" ? crossOriginIsolated : "?") +
+        " · SharedArrayBuffer=" + (typeof SharedArrayBuffer !== "undefined") +
+        " · origin=" + window.location.origin;
+    </script>
+    <div class="row">
+      <label for="weightsUrl">weights URL</label>
+      <input id="weightsUrl" type="text" size="60"
+        value="/local/smol-llama-101m/model.safetensors" />
+    </div>
+    <div class="row">
+      <label for="tokenizerUrl">tokenizer URL</label>
+      <input id="tokenizerUrl" type="text" size="60"
+        value="/local/smol-llama-101m/tokenizer.model" />
+    </div>
+    <div class="row">
+      <button id="loadWeights">load model + tokenizer</button>
+      <button id="clearCache" title="Wipes all OPFS-cached fetches">clear cache</button>
+      <span id="loadStatus" style="margin-left:0.6em;color:#555;font-family:ui-monospace,monospace;font-size:0.85em;"></span>
+    </div>
+    <hr style="margin:1em 0;border:0;border-top:1px solid #ddd;" />
+    <div class="row">
+      <label for="prompt" style="vertical-align:top">prompt</label>
+      <textarea id="prompt" rows="3" cols="60" style="font:inherit;vertical-align:top;">Once upon a time</textarea>
+    </div>
+    <div class="row">
+      <label for="maxNew">max new tokens</label>
+      <input id="maxNew" type="number" value="40" min="1" max="512" />
+    </div>
+    <div class="row">
+      <button id="generate">generate</button>
+      <button id="benchmark">benchmark all backends</button>
+    </div>
+    <div class="row" id="output"></div>
+    <div class="row" id="stats"></div>
+    <table id="benchTable" style="width:100%;border-collapse:collapse;display:none;">
+      <thead>
+        <tr style="text-align:left;border-bottom:1px solid #ccc;">
+          <th>backend</th><th>tokens</th><th>prefill (ms)</th>
+          <th>decode (ms)</th><th>total (ms)</th><th>tok/s</th>
+        </tr>
+      </thead>
+      <tbody id="benchBody"></tbody>
+    </table>
+    <p style="color:#888;font-size:0.85em">
+      Default checkpoint is Felladrin/Smol-Llama-101M-Chat-v1 (Llama-arch, ~101M params).
+      Click "load model + tokenizer" first; then enter a prompt and "generate".
+      The benchmark button still uses a tiny synthetic model to compare backends without a real-weight load.
+    </p>
+    <script type="module" src="/dist/browser.js"></script>
+  </body>
+</html>
