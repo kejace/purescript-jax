@@ -25,8 +25,8 @@ import Jax.Core
   , toJs
   , topK
   )
+import Jax.Coerce (asArray1D, asArray1DInt, asInt)
 import Jax.Random (Key, sampleCategorical)
-import Unsafe.Coerce (unsafeCoerce)
 
 -- | Greedy sampling: index of the largest logit. Input is borrowed.
 sampleGreedy :: NDArray D1 -> Effect Int
@@ -35,7 +35,7 @@ sampleGreedy logits = do
   idxArr <- argmax logitsR 0
   raw <- toJs idxArr
   dispose idxArr
-  pure (unsafeCoerce raw :: Int)
+  pure (asInt raw)
 
 -- | Temperature sampling. Scales logits by `1/temperature` before drawing
 -- | a categorical sample. Lower temperature → sharper; higher → flatter.
@@ -76,7 +76,7 @@ sampleTopK key k temperature logits = do
   raw <- toJs top.indices
   dispose top.values
   dispose top.indices
-  let allIndices = unsafeCoerce raw :: Array Int
+  let allIndices = asArray1DInt raw
   case allIndices !! localPos of
     Just idx -> pure idx
     Nothing -> throw $ "sampleTopK: localPos " <> show localPos
@@ -118,7 +118,7 @@ sampleTopP key p temperature logits = do
   cumForeign <- toJs cumprobs
   dispose cumprobs
   let
-    cumArr = unsafeCoerce cumForeign :: Array Number
+    cumArr = asArray1D cumForeign
     n = length cumArr
     k = findThresholdK cumArr p
   -- Truncate the sorted values to the nucleus and sample.
@@ -129,7 +129,7 @@ sampleTopP key p temperature logits = do
   idxForeign <- toJs top.indices
   dispose top.values
   dispose top.indices
-  let allIndices = unsafeCoerce idxForeign :: Array Int
+  let allIndices = asArray1DInt idxForeign
   case allIndices !! localPos of
     Just idx -> pure idx
     Nothing -> throw $ "sampleTopP: localPos " <> show localPos

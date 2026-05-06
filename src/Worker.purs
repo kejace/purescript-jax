@@ -13,8 +13,10 @@ import Effect.Console (log)
 import Effect.Exception (message, try)
 import Effect.Ref (Ref)
 import Effect.Ref as Ref
+import Data.Function.Uncurried (Fn3, runFn3)
 import Effect.Uncurried (EffectFn1, runEffectFn1)
 import Foreign (Foreign)
+import Jax.Coerce (asArray1D, asArray1DInt)
 import Jax.Core (D1, D2, NDArray, arrayInt1D, dispose, linspace, ref, reshape, shape, sliceAxis, toJs, topK)
 import Jax.NN.Block (emptyKVCacheStack, forwardCachedWithHead)
 import Jax.Loaders.Config (parseLlamaConfig)
@@ -230,9 +232,12 @@ handleLoadModel modelRef weightsUrl tokenizerUrl = do
 -- | Derive the config.json URL from a model.safetensors URL by string
 -- | replacement. Works for HuggingFace's `resolve/main/...` paths.
 configUrlFromWeights :: String -> String
-configUrlFromWeights = replaceImpl "model.safetensors" "config.json"
+configUrlFromWeights url = replace "model.safetensors" "config.json" url
 
-foreign import replaceImpl :: String -> String -> String -> String
+foreign import replaceImpl :: Fn3 String String String String
+
+replace :: String -> String -> String -> String
+replace search replacement input = runFn3 replaceImpl search replacement input
 
 -- Generate -------------------------------------------------------------------
 
@@ -367,8 +372,8 @@ diagPrefillTop5 lm promptIds = do
   dispose topVals
   dispose topIds
   let
-    vs = unsafeCoerce vF :: Array Number
-    is = unsafeCoerce iF :: Array Int
+    vs = asArray1D vF
+    is = asArray1DInt iF
   log "[worker] PREFILL top-5 next-token logits:"
   traverseN_ 5 \k ->
     case Array.index is k, Array.index vs k of

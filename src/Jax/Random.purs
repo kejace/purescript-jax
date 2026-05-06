@@ -9,8 +9,8 @@ import Prelude
 
 import Effect (Effect)
 import Effect.Uncurried (EffectFn1, EffectFn2, runEffectFn1, runEffectFn2)
+import Jax.Coerce (asInt)
 import Jax.Core (D1, NDArray, dispose, toJs)
-import Unsafe.Coerce (unsafeCoerce)
 
 -- | Opaque jax-js PRNG key. At runtime it's an int32 NDArray of small
 -- | length (typically 2). Refcount-managed like any other tensor.
@@ -39,5 +39,5 @@ sampleCategorical key logits = do
   idxArr <- runEffectFn2 sampleCategoricalImpl key logits
   raw <- toJs idxArr
   dispose idxArr
-  pure (unsafeCoerce raw :: Int)
+  pure (asInt raw)
 

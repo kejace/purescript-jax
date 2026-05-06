@@ -26,7 +26,7 @@ export const hasWebGpuImpl = () =>
 
 export const arrayLengthImpl = (xs) => xs.length;
 
-export const replaceImpl = (search) => (replacement) => (input) =>
+export const replaceImpl = (search, replacement, input) =>
   input.split(search).join(replacement);
 
 // String slicing for the streaming-decode delta calculation. Counts

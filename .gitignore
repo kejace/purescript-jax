@@ -8,5 +8,10 @@ public/dist/
 public/local/
 *.log
 .DS_Store
-# Claude / agent metadata.
-.claude/
+# Claude / agent metadata. Personal settings stay ignored; project-shared
+# rules and skills are explicitly un-ignored below so collaborators get
+# them via git.
+.claude/*
+!.claude/fp-police-rules.md
+!.claude/skills
+.claude/settings.local.json

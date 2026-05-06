@@ -3,9 +3,10 @@ module Test.Main where
 import Prelude hiding (add, mul)
 
 import Control.Monad.Trans.Class (lift)
+import Data.Foldable (foldl)
+import Data.Function.Uncurried (Fn3, runFn3)
 import Effect (Effect)
 import Effect.Console (log)
-import Data.Foldable (foldl)
 import Effect.Exception (throw)
 import Foreign (Foreign)
 import Jax.Core
@@ -121,7 +122,7 @@ assertCloseArray label expected actual =
   else
     let
       tol = 1.0e-4
-      ok = allCloseImpl tol expected actual
+      ok = allClose tol expected actual
     in
       if ok then log $ "  ✓ " <> label
       else throw $ "  ✗ " <> label <> ": expected " <> show expected <> ", got " <> show actual
@@ -142,8 +143,15 @@ asArray2D = unsafeCoerce
 
 -- Foreign array helpers (no Data.Array import to keep deps minimal) -----------
 
-foreign import length :: forall a. Array a -> Int
-foreign import allCloseImpl :: Number -> Array Number -> Array Number -> Boolean
+foreign import lengthImpl :: forall a. Array a -> Int
+
+length :: forall a. Array a -> Int
+length = lengthImpl
+
+foreign import allCloseImpl :: Fn3 Number (Array Number) (Array Number) Boolean
+
+allClose :: Number -> Array Number -> Array Number -> Boolean
+allClose tol a b = runFn3 allCloseImpl tol a b
 
 -- Tests -----------------------------------------------------------------------
 
