@@ -115,11 +115,12 @@ attentionForward cfg w seqLen cosSlice sinSlice xNormed = do
   let halfDim = cfg.headDim / 2
       qDim = cfg.nHeads * cfg.headDim
       xT = T.lit xNormed
-  -- Q/K/V projection + reshape via the Tensor DSL — each `lit` ref-bumps
-  -- xNormed once per use, so xNormed itself stays at refcount 1.
-  q <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wq)) [ seqLen, cfg.nHeads, cfg.headDim ])
-  k <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wk)) [ seqLen, cfg.nKvHeads, cfg.headDim ])
-  v <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wv)) [ seqLen, cfg.nKvHeads, cfg.headDim ])
+  -- Q/K/V projection + reshape — each `T.lit xT` re-runs `ref`, so
+  -- xNormed itself stays at refcount 1 even though it's used three
+  -- times. Operator `**.` is the matmul.
+  q <- T.run (T.reshapeT (xT T.**. T.lit w.wq) [ seqLen, cfg.nHeads, cfg.headDim ])
+  k <- T.run (T.reshapeT (xT T.**. T.lit w.wk) [ seqLen, cfg.nKvHeads, cfg.headDim ])
+  v <- T.run (T.reshapeT (xT T.**. T.lit w.wv) [ seqLen, cfg.nKvHeads, cfg.headDim ])
   -- RoPE on Q and K (rank-polymorphic; cos/sin already shaped to broadcast).
   qRot <- applyRoPE halfDim q cosSlice sinSlice
   kRot <- applyRoPE halfDim k cosSlice sinSlice
@@ -129,7 +130,7 @@ attentionForward cfg w seqLen cosSlice sinSlice xNormed = do
   kFull <- expandKV cfg kRot
   vFull <- expandKV cfg v
   attnOut <- attention qRot kFull vFull
-  T.run (T.matmulT (T.reshapeT (T.lit attnOut) [ seqLen, qDim ]) (T.lit w.wo))
+  T.run (T.reshapeT (T.lit attnOut) [ seqLen, qDim ] T.**. T.lit w.wo)
 
 -- | One transformer block with residuals:
 -- |   h = x + attention(rmsnorm(x))
@@ -143,17 +144,12 @@ transformerBlock
   -> NDArray D2    -- x [seq, hidden]
   -> Effect (NDArray D2)
 transformerBlock cfg lw seqLen cosSlice sinSlice x = do
-  -- Pre-attention norm: rmsnorm now uses the Tensor DSL internally,
-  -- so this is a single Effect call without ref-bumping its inputs.
   xNormed <- rmsnorm cfg.normEps x lw.attnNorm
   attnOut <- attentionForward cfg lw.attn seqLen cosSlice sinSlice xNormed
-  -- Residual: h = x + attn_out. Tensor DSL handles the ref-bump.
-  h <- T.run (T.addT (T.lit x) (T.lit attnOut))
+  h <- T.run (T.lit x T.+. T.lit attnOut)
   hNormed <- rmsnorm cfg.normEps h lw.mlpNorm
   mlpOut <- mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
-  -- Free attnOut + mlpOut by way of consuming them in Tensor; lit on
-  -- `h` ref-bumps it so it survives for the second add.
-  T.run (T.addT (T.lit h) (T.lit mlpOut))
+  T.run (T.lit h T.+. T.lit mlpOut)
 
 -- | Full stack: embed → n × transformerBlock → finalNorm. Returns the
 -- | final hidden states (not yet projected to logits).
@@ -275,10 +271,10 @@ attentionForwardCached cfg w newSeq cosSlice sinSlice prevCache xNormed = do
   let halfDim = cfg.headDim / 2
       qDim = cfg.nHeads * cfg.headDim
       xT = T.lit xNormed
-  -- Q/K/V projection + reshape via the Tensor DSL.
-  q <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wq)) [ newSeq, cfg.nHeads, cfg.headDim ])
-  newK <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wk)) [ newSeq, cfg.nKvHeads, cfg.headDim ])
-  newV <- T.run (T.reshapeT (T.matmulT xT (T.lit w.wv)) [ newSeq, cfg.nKvHeads, cfg.headDim ])
+  -- Q/K/V projection + reshape (xT used three times → three ref bumps).
+  q <- T.run (T.reshapeT (xT T.**. T.lit w.wq) [ newSeq, cfg.nHeads, cfg.headDim ])
+  newK <- T.run (T.reshapeT (xT T.**. T.lit w.wk) [ newSeq, cfg.nKvHeads, cfg.headDim ])
+  newV <- T.run (T.reshapeT (xT T.**. T.lit w.wv) [ newSeq, cfg.nKvHeads, cfg.headDim ])
   -- RoPE on Q and (new) K only — cached K already had RoPE applied.
   qRot <- applyRoPE halfDim q cosSlice sinSlice
   newKRot <- applyRoPE halfDim newK cosSlice sinSlice
@@ -300,7 +296,7 @@ attentionForwardCached cfg w newSeq cosSlice sinSlice prevCache xNormed = do
     if newSeq == kvSeq
       then attention qRot fullKExp fullVExp
       else attentionNoMask qRot fullKExp fullVExp
-  output <- T.run (T.matmulT (T.reshapeT (T.lit attnOut) [ newSeq, qDim ]) (T.lit w.wo))
+  output <- T.run (T.reshapeT (T.lit attnOut) [ newSeq, qDim ] T.**. T.lit w.wo)
   pure { newCache: { k: fullK, v: fullV }, output }
 
 -- | One transformer block, KVCache-aware.
@@ -317,10 +313,10 @@ transformerBlockCached cfg lw newSeq cosSlice sinSlice prevCache x = do
   xNormed <- rmsnorm cfg.normEps x lw.attnNorm
   { newCache, output: attnOut } <-
     attentionForwardCached cfg lw.attn newSeq cosSlice sinSlice prevCache xNormed
-  h <- T.run (T.addT (T.lit x) (T.lit attnOut))
+  h <- T.run (T.lit x T.+. T.lit attnOut)
   hNormed <- rmsnorm cfg.normEps h lw.mlpNorm
   mlpOut <- mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
-  out <- T.run (T.addT (T.lit h) (T.lit mlpOut))
+  out <- T.run (T.lit h T.+. T.lit mlpOut)
   pure { newCache, output: out }
 
 -- | Cached forward pass over the full layer stack. Handles both prefill

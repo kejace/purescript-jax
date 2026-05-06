@@ -9,7 +9,7 @@ import Prelude
 import Effect (Effect)
 import Effect.Uncurried (EffectFn3, runEffectFn3)
 import Jax.Core (D2, NDArray)
-import Jax.Tensor (T, addT, concatAxisT, lit, mulT, run, sliceLastAxisT, subT)
+import Jax.Tensor (T, concatAxisT, lit, run, sliceLastAxisT, (*.), (+.), (-.))
 
 -- | Precomputed rotary frequency tables. cos and sin both have shape
 -- | `[maxSeqLen, dim/2]`. These are constants for the model's lifetime —
@@ -48,19 +48,20 @@ applyRoPE
   -> NDArray d     -- ^ cos table, broadcast-compatible with x
   -> NDArray d     -- ^ sin table, broadcast-compatible with x
   -> Effect (NDArray d)
-applyRoPE halfDim x cosT sinT = run $ concatAxisT [ yFirst, ySecond ] (-1)
+applyRoPE halfDim x cosT sinT = run (concatAxisT [ yFirst, ySecond ] (-1))
   where
   dim = halfDim * 2
   xT = lit x
   cT = lit cosT
   sT = lit sinT
-  -- Each `lit` is a fresh ref-bumped action — `lit x` used twice ref-bumps
-  -- twice. So we reuse the same `xT` / `cT` / `sT` bindings freely.
+  -- Each `lit` re-runs `ref` on its source, so reusing `xT`/`cT`/`sT`
+  -- below is safe — the underlying tensor refcounts climb just enough
+  -- to feed each consuming op exactly once.
   xFirst :: T d
   xFirst = sliceLastAxisT xT 0 halfDim
   xSecond :: T d
   xSecond = sliceLastAxisT xT halfDim dim
   yFirst :: T d
-  yFirst = subT (mulT xFirst cT) (mulT xSecond sT)
+  yFirst = (xFirst *. cT) -. (xSecond *. sT)
   ySecond :: T d
-  ySecond = addT (mulT xFirst sT) (mulT xSecond cT)
+  ySecond = (xFirst *. sT) +. (xSecond *. cT)

@@ -6,7 +6,7 @@
 -- | borrowed source tensor. So a value like
 -- |
 -- |     let xT = lit x
--- |     in xT `mul` xT
+-- |     in xT *. xT
 -- |
 -- | runs `ref x` twice, producing two refcount-bumped handles, both of
 -- | which `Core.mul` consumes — leaving `x` itself untouched.
@@ -15,9 +15,16 @@
 -- | `run`); intermediate fresh tensors are owned and consumed by the
 -- | next combinator in the chain.
 -- |
--- | Convention: every public `T`-flavoured combinator below is the
--- | DSL version of its `Jax.Core` counterpart, with the suffix `T` to
--- | avoid shadowing.
+-- | Operator vocabulary (matches standard math precedence):
+-- |
+-- |   +.   elementwise addition          (infixl 6)
+-- |   -.   elementwise subtraction       (infixl 6)
+-- |   *.   elementwise multiplication    (infixl 7)
+-- |   **.  matmul                        (infixl 7)
+-- |
+-- | We don't use `Semiring`/`Ring` instances on `T d` because shape-less
+-- | `zero`/`one` don't make sense for tensors — the `ad-hoc` operators
+-- | give the same readability win without the awkward instance laws.
 module Jax.Tensor
   ( T
   , run
@@ -27,6 +34,10 @@ module Jax.Tensor
   , mulT
   , subT
   , matmulT
+  , (+.)
+  , (-.)
+  , (*.)
+  , (**.)
   -- * Unary ops
   , rsqrtT
   , squareT
@@ -102,6 +113,11 @@ matmulT (T ax) (T bx) = T do
   a <- ax
   b <- bx
   Core.matmul a b
+
+infixl 6 addT as +.
+infixl 6 subT as -.
+infixl 7 mulT as *.
+infixl 7 matmulT as **.
 
 -- =============================================================================
 -- Unary

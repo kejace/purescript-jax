@@ -7,7 +7,7 @@ import Prelude
 
 import Effect (Effect)
 import Jax.Core (D1, D2, NDArray, ref, take)
-import Jax.Tensor (lit, matmulT, run, transposeT)
+import Jax.Tensor (lit, run, transposeT, (**.))
 
 -- | Token embedding lookup: `table[ids]`.
 -- |
@@ -41,4 +41,4 @@ unembed
   :: NDArray D2
   -> NDArray D2
   -> Effect (NDArray D2)
-unembed hidden table = run $ matmulT (lit hidden) (transposeT (lit table))
+unembed hidden table = run (lit hidden **. transposeT (lit table))
