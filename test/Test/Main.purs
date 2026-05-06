@@ -71,8 +71,12 @@ import Test.SafetensorsFixture (makeFixture)
 import Test.BpeFixture as BpeFix
 import Test.LlamaFixture (makeLlamaFixture, llamaFixtureCfg)
 import Jax.Loaders.LlamaAdapter (loadLlamaWeights)
-import Jax.Pytree (countParams, countTensors, sumSquaredL2)
+import Jax.Pytree (countParams, countTensors, perLayerL2sq, sumSquaredL2)
+import Jax.Optics (_embedding, _finalNorm)
 import Data.Foldable (for_)
+import Data.Lens (preview)
+import Data.Maybe (Maybe(..))
+import Data.Number as Math
 import Unsafe.Coerce (unsafeCoerce)
 
 main :: Effect Unit
@@ -918,6 +922,33 @@ testLlamaEndToEnd = do
   l2sq <- sumSquaredL2 ckpt.weights
   if l2sq > 0.0 then log "  ✓ sumSquaredL2 ckpt.weights > 0"
   else throw $ "  ✗ sumSquaredL2 expected > 0, got " <> show l2sq
+  -- Optic-based per-layer L2: walk just one layer's worth of tensors
+  -- via the `_layer i` affine traversal from `Jax.Optics`. Sum across
+  -- layers must match the global sumSquaredL2 (within FP slop) since
+  -- the only non-layer tensors are embedding + finalNorm, and we
+  -- subtract those. Also verifies the lens path-composition compiles.
+  perLayerSq <- perLayerL2sq fcfg.nLayers ckpt.weights
+  let layerSumSq = foldl (+) 0.0 perLayerSq
+  case preview _embedding ckpt.weights, preview _finalNorm ckpt.weights of
+    Just embT, Just fnT -> do
+      eR <- ref embT
+      esq <- square eR
+      es <- sum esq
+      esF <- toJs es
+      dispose es
+      let embSq = unsafeCoerce esF :: Number
+      fR <- ref fnT
+      fsq <- square fR
+      fs <- sum fsq
+      fsF <- toJs fs
+      dispose fs
+      let fnSq = unsafeCoerce fsF :: Number
+      let diff = Math.abs (l2sq - layerSumSq - embSq - fnSq)
+      if diff < 1.0e-3 then
+        log $ "  ✓ Σ perLayerL2sq + embedding² + finalNorm² ≈ sumSquaredL2 (Δ="
+          <> show diff <> ")"
+      else throw $ "  ✗ pytree L2 decomposition mismatch · diff=" <> show diff
+    _, _ -> throw "  ✗ preview _embedding / _finalNorm returned Nothing"
   log "  ✓ end-to-end safetensors → adapter → forward + pytree traversal"
 
 testTransformerTraining :: Effect Unit

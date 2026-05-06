@@ -17,6 +17,7 @@ module Jax.Pytree
   , countParams
   -- * Statistics
   , sumSquaredL2
+  , perLayerL2sq
   -- * Tags (re-export so callers can use the same instances)
   , CountTensor(..)
   , CountParam(..)
@@ -26,10 +27,15 @@ module Jax.Pytree
 import Prelude
 
 import Data.Foldable (foldl) as Foldable
+import Data.Lens (preview)
+import Data.Maybe (Maybe(..))
+import Data.Traversable (traverse)
 import Effect (Effect)
 import Heterogeneous.Folding (class Folding, class HFoldl, folding, hfoldl)
 import Jax.Coerce (asNumber)
 import Jax.Core (NDArray, dispose, ref, shape, square, sum, toJs)
+import Jax.NN.Block (ModelWeights)
+import Jax.Optics (_layer)
 
 -- =============================================================================
 -- countTensors
@@ -156,3 +162,24 @@ sumSquaredL2
   => { | r }
   -> Effect Number
 sumSquaredL2 r = hfoldl SumSquaredL2 (pure 0.0 :: Effect Number) r
+
+-- | Per-layer Σᵢ wᵢ² for `[0..nLayers-1]`. Uses the `_layer i` affine
+-- | traversal from `Jax.Optics` to focus each layer; missing indices
+-- | produce `0.0`. Useful for spotting outlier-magnitude layers in a
+-- | trained checkpoint (typically the first/last few layers carry
+-- | larger weights than middle layers in transformers — if every
+-- | layer reads the same, the diagnostic isn't telling you much; if
+-- | one layer reads 100× others, suspect bad load/init).
+-- |
+-- | Cost: one `square + sum` per tensor leaf in each layer. For a
+-- | 6-layer 101M-param model that's ~50 small reductions on the
+-- | device — sub-second on any backend.
+perLayerL2sq :: Int -> ModelWeights -> Effect (Array Number)
+perLayerL2sq nLayers weights =
+  traverse layerL2 (range nLayers)
+  where
+  range n = if n <= 0 then [] else go 0 n []
+  go i n acc = if i >= n then acc else go (i + 1) n (acc <> [ i ])
+  layerL2 i = case preview (_layer i) weights of
+    Just lyr -> sumSquaredL2 lyr
+    Nothing -> pure 0.0

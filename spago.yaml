@@ -15,6 +15,7 @@ package:
     - heterogeneous
     - maybe
     - prelude
+    - profunctor-lenses
     - transformers
     - tuples
   test:

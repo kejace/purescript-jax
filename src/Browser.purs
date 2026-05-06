@@ -2,6 +2,7 @@ module Browser where
 
 import Prelude
 
+import Data.Array (null) as Array
 import Data.Array (intercalate)
 import Data.Either (Either(..))
 import Data.Int (fromString)
@@ -142,6 +143,7 @@ main = do
         ( "training " <> show r.paramCount <> " params · "
             <> "initial loss " <> toFixed4 r.initialLoss
             <> " · L2 " <> toFixed4 r.initialL2
+            <> formatPerLayer r.initialPerLayerL2
             <> " · " <> show r.steps <> " steps planned"
         )
       TrainStep r -> setText statsEl
@@ -149,6 +151,7 @@ main = do
       TrainDone r -> setText statsEl
         ( "training complete · final loss " <> toFixed4 r.finalLoss
             <> " · L2 " <> toFixed4 r.finalL2
+            <> formatPerLayer r.finalPerLayerL2
             <> " · before/after gen: "
             <> formatTokens r.initialGen <> " → " <> formatTokens r.finalGen
             <> " · " <> toFixed1 r.totalMs <> " ms"
@@ -250,6 +253,14 @@ parseTokenList s =
 
 formatTokens :: Array Int -> String
 formatTokens xs = "[" <> intercalate ", " (map show xs) <> "]"
+
+-- Render per-layer L2 norms as " · per-layer [0.123, 0.456]". Empty
+-- when no layers were reported (e.g. a stretch goal where someone
+-- runs training on a non-stacked toy model).
+formatPerLayer :: Array Number -> String
+formatPerLayer xs =
+  if Array.null xs then ""
+  else " · per-layer [" <> intercalate ", " (map toFixed4 xs) <> "]"
 
 showTps :: Int -> Number -> String
 showTps count totalMs =

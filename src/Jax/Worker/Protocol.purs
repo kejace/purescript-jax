@@ -191,12 +191,14 @@ data WorkerOut
       { paramCount :: Int
       , initialLoss :: Number
       , initialL2 :: Number
+      , initialPerLayerL2 :: Array Number
       , steps :: Int
       }
   | TrainStep { step :: Int, loss :: Number }
   | TrainDone
       { finalLoss :: Number
       , finalL2 :: Number
+      , finalPerLayerL2 :: Array Number
       , initialGen :: Array Int
       , finalGen :: Array Int
       , totalMs :: Number
@@ -303,19 +305,22 @@ benchResultP = CAR.object "BenchResult"
   , prefillMs: CA.number, decodeMs: CA.number, totalMs: CA.number }
 
 trainStartP :: JsonCodec
-  { paramCount :: Int, initialLoss :: Number, initialL2 :: Number, steps :: Int }
+  { paramCount :: Int, initialLoss :: Number, initialL2 :: Number
+  , initialPerLayerL2 :: Array Number, steps :: Int }
 trainStartP = CAR.object "TrainStart"
   { paramCount: CA.int, initialLoss: CA.number
-  , initialL2: CA.number, steps: CA.int }
+  , initialL2: CA.number, initialPerLayerL2: CA.array CA.number
+  , steps: CA.int }
 
 trainStepP :: JsonCodec { step :: Int, loss :: Number }
 trainStepP = CAR.object "TrainStep" { step: CA.int, loss: CA.number }
 
 trainDoneP :: JsonCodec
-  { finalLoss :: Number, finalL2 :: Number
+  { finalLoss :: Number, finalL2 :: Number, finalPerLayerL2 :: Array Number
   , initialGen :: Array Int, finalGen :: Array Int, totalMs :: Number }
 trainDoneP = CAR.object "TrainDone"
   { finalLoss: CA.number, finalL2: CA.number
+  , finalPerLayerL2: CA.array CA.number
   , initialGen: CA.array CA.int, finalGen: CA.array CA.int
   , totalMs: CA.number }
 

@@ -37,7 +37,7 @@ import Jax.NN.Train (makeCrossEntropyLoss)
 import Jax.Random as Random
 import Jax.Optax as Optax
 import Jax.Autodiff (valueAndGradT)
-import Jax.Pytree (countParams, countTensors, sumSquaredL2)
+import Jax.Pytree (countParams, countTensors, perLayerL2sq, sumSquaredL2)
 import Data.Traversable (traverse)
 import Data.Number as Math
 import Unsafe.Coerce (unsafeCoerce)
@@ -553,7 +553,7 @@ handleTrainSynthetic steps lr = do
     cfg :: ModelConfig
     cfg =
       { hidden: 8, nHeads: 2, nKvHeads: 2, headDim: 4
-      , intermediate: 16, nLayers: 1, maxSeqLen: 8
+      , intermediate: 16, nLayers: 2, maxSeqLen: 8
       , vocabSize: 8, ropeTheta: 10000.0, normEps: 1.0e-6
       }
   result <- try do
@@ -571,8 +571,10 @@ handleTrainSynthetic steps lr = do
     let initialLoss = unsafeCoerce initLossF :: Number
     dispose initVag.value
     initialL2sq <- sumSquaredL2 weights0
+    initialPerLayerSq <- perLayerL2sq cfg.nLayers weights0
     let
       paramCount = countTensors weights0  -- # tensor leaves; not the param count
+      initialPerLayer = map Math.sqrt initialPerLayerSq
     nParams <- countParams weights0
     -- Initial generation (greedy from [1]).
     initialGen <- generateGreedyCached cfg weights0 rope [ 1 ] 3
@@ -580,6 +582,7 @@ handleTrainSynthetic steps lr = do
       { paramCount: nParams
       , initialLoss
       , initialL2: Math.sqrt initialL2sq
+      , initialPerLayerL2: initialPerLayer
       , steps
       }
     -- Optimizer init (consumes weights → use a ref-bumped copy).
@@ -594,11 +597,14 @@ handleTrainSynthetic steps lr = do
     let finalLoss = unsafeCoerce finalLossF :: Number
     dispose finalVag.value
     finalL2sq <- sumSquaredL2 finalState.weights
+    finalPerLayerSq <- perLayerL2sq cfg.nLayers finalState.weights
+    let finalPerLayer = map Math.sqrt finalPerLayerSq
     finalGen <- generateGreedyCached cfg finalState.weights rope [ 1 ] 3
     end <- performanceNow
     pure
       { finalLoss
       , finalL2: Math.sqrt finalL2sq
+      , finalPerLayerL2: finalPerLayer
       , initialGen
       , finalGen
       , totalMs: end - start
@@ -609,6 +615,7 @@ handleTrainSynthetic steps lr = do
     Right r -> post $ TrainDone
       { finalLoss: r.finalLoss
       , finalL2: r.finalL2
+      , finalPerLayerL2: r.finalPerLayerL2
       , initialGen: r.initialGen
       , finalGen: r.finalGen
       , totalMs: r.totalMs
