@@ -73,6 +73,9 @@ import Test.LlamaFixture (makeLlamaFixture, llamaFixtureCfg)
 import Jax.Loaders.LlamaAdapter (loadLlamaWeights)
 import Jax.Pytree (countParams, countTensors, perLayerL2sq, sumSquaredL2)
 import Jax.Optics (_embedding, _finalNorm)
+import Jax.Loaders.Config as Cfg
+import Data.Either (Either(..))
+import Data.String (Pattern(..), indexOf) as StrIdx
 import Data.Foldable (for_)
 import Data.Lens (preview)
 import Data.Maybe (Maybe(..))
@@ -126,6 +129,7 @@ specs = do
     it "SentencePiece BPE parity" (liftEffect testSentencePieceBPE)
     it "safetensors" (liftEffect testSafetensors)
     it "Llama end-to-end (synthetic fixture)" (liftEffect testLlamaEndToEnd)
+    it "HF config decoder (real-world JSON shape)" (liftEffect testHFConfigDecode)
   describe "Numerical parity" do
     it "analytic checks" (liftEffect testNumericalParity)
 
@@ -855,6 +859,70 @@ testNumericalParity = do
       assertCloseArray "A @ A^T for A=[[1,2],[3,4]]"
         [ 5.0, 11.0, 11.0, 25.0 ]
         (asArray1D f)
+
+-- | Regression test for the config codec.
+-- |
+-- | Both `extrasCodec` and `rawCodec` previously used
+-- | `Data.Codec.Argonaut.Common.maybe`, which encodes `Maybe a` as a
+-- | tagged sum (`{"Just": ...}`) — wrong for HF JSON where optional
+-- | fields are simply absent or carry a real value. This caught the
+-- | regression that broke TinyLlama load with:
+-- |
+-- |     Under 'ConfigExtras': At object key tie_word_embeddings:
+-- |     Under 'Maybe': Expected value of type 'Object'.
+-- |
+-- | Using a representative HF config (mirrors TinyLlama-1.1B-Chat
+-- | layout: tied=false, BF16 source, GQA 8:1).
+testHFConfigDecode :: Effect Unit
+testHFConfigDecode = do
+  log "HF config decoder (real-world JSON shape):"
+  let
+    cfgJson =
+      """{
+        "architectures": ["LlamaForCausalLM"],
+        "model_type": "llama",
+        "hidden_size": 2048,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 4,
+        "intermediate_size": 5632,
+        "num_hidden_layers": 22,
+        "max_position_embeddings": 2048,
+        "vocab_size": 32000,
+        "rope_theta": 10000.0,
+        "rms_norm_eps": 1e-05,
+        "tie_word_embeddings": false,
+        "bos_token_id": 1,
+        "eos_token_id": 2
+      }"""
+  case Cfg.probeRawExtras cfgJson of
+    Left err -> throw $ "  ✗ probeRawExtras failed: " <> err
+    Right r -> do
+      case r.tie_word_embeddings of
+        Just false -> log "  ✓ probeRawExtras decoded tie_word_embeddings=false"
+        Just true -> throw "  ✗ tie_word_embeddings expected false, got true"
+        Nothing -> throw "  ✗ tie_word_embeddings missing from decoded extras"
+      case r.model_type of
+        Just "llama" -> log "  ✓ probeRawExtras decoded model_type=llama"
+        _ -> throw "  ✗ model_type expected Just \"llama\""
+  -- Round-trip the full config too — same JSON, full ModelConfig.
+  cfg <- Cfg.parseLlamaConfig cfgJson
+  if cfg.hidden == 2048 && cfg.nHeads == 32 && cfg.nKvHeads == 4
+    && cfg.nLayers == 22 && cfg.vocabSize == 32000
+  then log "  ✓ parseLlamaConfig produces correct ModelConfig"
+  else throw $ "  ✗ ModelConfig fields wrong: " <> show cfg
+  -- Soft-test: probe rejects an incompatible model_type.
+  let phiJson = """{"model_type": "phi", "hidden_size": 0,
+                    "num_attention_heads": 0, "intermediate_size": 0,
+                    "num_hidden_layers": 0, "vocab_size": 0}"""
+  case Cfg.probeRawExtras phiJson of
+    Left err
+      | indexOfStr "phi" err -> log "  ✓ probeRawExtras rejects model_type=phi"
+      | otherwise -> throw $ "  ✗ wrong rejection message: " <> err
+    Right _ -> throw "  ✗ probeRawExtras should have rejected phi"
+  where
+  indexOfStr needle s = case StrIdx.indexOf (StrIdx.Pattern needle) s of
+    Just _ -> true
+    Nothing -> false
 
 testLlamaEndToEnd :: Effect Unit
 testLlamaEndToEnd = do

@@ -26,7 +26,6 @@ import Data.Argonaut.Parser (jsonParser)
 import Data.Array (elem) as Array
 import Data.Codec.Argonaut (JsonCodec, decode, printJsonDecodeError)
 import Data.Codec.Argonaut as CA
-import Data.Codec.Argonaut.Common as CACommon
 import Data.Codec.Argonaut.Record as CAR
 import Data.Either (Either(..))
 import Data.Maybe (Maybe(..), fromMaybe)
@@ -83,12 +82,17 @@ type RawConfigExtras =
   , sliding_window :: Maybe Int
   }
 
+-- HF configs encode optional fields as "field present with real value
+-- OR field absent" — never as the tagged-sum `{"Just": ...}` form
+-- that `Data.Codec.Argonaut.Common.maybe` expects. So we use
+-- `CAR.optional` (record-level), which lifts a `JsonCodec a` into a
+-- field that decodes to `Maybe a` based on field presence.
 extrasCodec :: JsonCodec RawConfigExtras
 extrasCodec = CAR.object "ConfigExtras"
-  { architectures: CACommon.maybe (CA.array CA.string)
-  , model_type: CACommon.maybe CA.string
-  , tie_word_embeddings: CACommon.maybe CA.boolean
-  , sliding_window: CACommon.maybe CA.int
+  { architectures: CAR.optional (CA.array CA.string)
+  , model_type: CAR.optional CA.string
+  , tie_word_embeddings: CAR.optional CA.boolean
+  , sliding_window: CAR.optional CA.int
   }
 
 -- | Run the extras codec on a config.json string. Returns a structured
@@ -158,12 +162,12 @@ rawCodec :: JsonCodec RawConfig
 rawCodec = CAR.object "LlamaConfigRaw"
   { hidden_size: CA.int
   , num_attention_heads: CA.int
-  , num_key_value_heads: CACommon.maybe CA.int
-  , head_dim: CACommon.maybe CA.int
+  , num_key_value_heads: CAR.optional CA.int
+  , head_dim: CAR.optional CA.int
   , intermediate_size: CA.int
   , num_hidden_layers: CA.int
-  , max_position_embeddings: CACommon.maybe CA.int
+  , max_position_embeddings: CAR.optional CA.int
   , vocab_size: CA.int
-  , rope_theta: CACommon.maybe CA.number
-  , rms_norm_eps: CACommon.maybe CA.number
+  , rope_theta: CAR.optional CA.number
+  , rms_norm_eps: CAR.optional CA.number
   }
