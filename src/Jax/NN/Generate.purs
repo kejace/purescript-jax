@@ -1,5 +1,32 @@
+-- | Autoregressive generation built on a single primitive `decodeLoop`.
+-- |
+-- | All public `generate*` functions are thin wrappers that pick a
+-- | `Sampler` (greedy / temperature / top-k / top-p) and a `Reporter`
+-- | (silent collector or per-token callback for streaming UIs), then
+-- | call `decodeLoop`. This is a one-stop shop for autoregressive
+-- | inference; the original five mutually-recursive decode loops have
+-- | collapsed into one.
+-- |
+-- | Memory discipline (jax-js refcount):
+-- |   * `forwardCached*` returns a fresh logits tensor; the loop owns
+-- |     and disposes it via `withLastRow`.
+-- |   * The KVCacheStack is consumed by each `forwardCached*` call and
+-- |     replaced with the returned `newCache` — no leaks unless the
+-- |     loop body throws (in which case the unfinished cache leaks; we
+-- |     don't currently bracket-protect this because there's no
+-- |     recoverable scenario in our callers).
 module Jax.NN.Generate
-  ( generateGreedy
+  ( -- * The primitive
+    Sampler(..)
+  , runSampler
+  , Reporter
+  , StopCond
+  , decodeLoop
+  , decodeLoopWithHead
+  -- * Helpers
+  , withLastRow
+  -- * Pre-baked recipes
+  , generateGreedy
   , generateGreedyCached
   , generateTemperature
   , generateTopK
@@ -9,12 +36,14 @@ module Jax.NN.Generate
   , generateGreedyCachedStreamUntilWithHead
   ) where
 
-import Prelude hiding (add)
+import Prelude
 
+import Control.Monad.Rec.Class (Step(..), tailRecM)
 import Data.Array (last, length, snoc, head, (!!)) as Array
 import Data.Foldable (traverse_)
 import Data.Maybe (Maybe(..), fromMaybe)
 import Effect (Effect)
+import Effect.Ref as Ref
 import Jax.Core
   ( D1
   , D2
@@ -39,8 +68,191 @@ import Jax.NN.RoPE (RoPETables)
 import Jax.NN.Sampling (sampleGreedy, sampleTemperature, sampleTopK, sampleTopP)
 import Jax.Random (Key, splitKey2)
 
--- | Greedy autoregressive generation. Naive — recomputes the full forward
--- | pass every step (O(n²) total).
+-- | A sampler turns a 1D logits tensor into a token id and the next
+-- | sampler to use. The next-sampler return lets temperature/top-k/
+-- | top-p re-key on each step without inventing a separate API per
+-- | sampler. Greedy ignores keys and returns itself; keyed samplers
+-- | split a private key on each invocation.
+-- |
+-- | Newtype rather than `type` because the recursive shape
+-- | (`Sampler` → `Effect { ... Sampler }`) would be a cycle in a type
+-- | synonym. The `NDArray D1` argument is consumed.
+newtype Sampler = Sampler (NDArray D1 -> Effect { token :: Int, next :: Sampler })
+
+runSampler :: Sampler -> NDArray D1 -> Effect { token :: Int, next :: Sampler }
+runSampler (Sampler f) = f
+
+-- | Per-token reporter. `mempty`-equivalent for batch generation;
+-- | populated for streaming UIs.
+type Reporter = Int -> Effect Unit
+
+-- | Termination predicate (e.g., on EOS). `const false` to disable.
+type StopCond = Int -> Boolean
+
+-- | Slice the last row of a `[seq, vocab]` logits tensor and call the
+-- | continuation with the resulting `[vocab]` tensor. Both the input
+-- | and the intermediate slice are disposed before/after the
+-- | continuation runs.
+-- |
+-- | This folds the slice → reshape → flatten ritual into one place;
+-- | every sampler call site used to repeat ~7 lines of plumbing.
+withLastRow :: forall a. NDArray D2 -> (NDArray D1 -> Effect a) -> Effect a
+withLastRow logits k = do
+  sh <- shape logits
+  let
+    seqLen = fromMaybe 0 (Array.head sh)
+    vocab = fromMaybe 0 (sh Array.!! 1)
+  logitsR <- ref logits
+  lastRow <- sliceAxis logitsR 0 (seqLen - 1) seqLen
+  dispose logits
+  lastRowR <- ref lastRow
+  flat <- reshape lastRowR [ vocab ] :: Effect (NDArray D1)
+  dispose lastRow
+  result <- k flat
+  dispose flat
+  pure result
+
+-- | The decode primitive. Prefill on the prompt, then loop one token
+-- | at a time:
+-- |   1. Forward through `forwardCachedWithHead` for the new token(s).
+-- |   2. Sample via the supplied `Sampler`, threading its next-step state.
+-- |   3. Report (for streaming) and append.
+-- |   4. Stop on `stop`-true or after `maxNew` tokens.
+-- |
+-- | Stack-safe via `tailRecM`: the loop body returns `Step` values, so
+-- | even at very large `maxNew` we don't grow the call stack.
+decodeLoopWithHead
+  :: ModelConfig
+  -> ModelWeights
+  -> NDArray D2       -- ^ LM-head projection [vocab, hidden]
+  -> RoPETables
+  -> Sampler
+  -> Reporter
+  -> StopCond
+  -> Array Int        -- ^ prompt
+  -> Int              -- ^ maxNew
+  -> Effect (Array Int)
+decodeLoopWithHead cfg weights head rope sampler0 report stop prompt maxNew = do
+  cache0 <- emptyKVCacheStack cfg
+  -- Prefill.
+  promptIds <- arrayInt1D prompt
+  { newCache: cacheAfterPrefill, logits: l1 } <-
+    forwardCachedWithHead cfg weights head rope cache0 0 promptIds
+  dispose promptIds
+  { token: firstNew, next: sampler1 } <- withLastRow l1 (runSampler sampler0)
+  report firstNew
+  let startPos = Array.length prompt
+  -- Decode loop, stack-safely. State carries (remaining, position,
+  -- accumulated context, cache, sampler).
+  finalCtxRef <- Ref.new (Array.snoc prompt firstNew)
+  finalCacheRef <- Ref.new cacheAfterPrefill
+  if stop firstNew then pure unit
+  else do
+    let
+      stepInit =
+        { remaining: maxNew - 1
+        , pos: startPos + 1
+        , cache: cacheAfterPrefill
+        , sampler: sampler1
+        , last: firstNew
+        }
+      step s
+        | s.remaining <= 0 = do
+            Ref.write s.cache finalCacheRef
+            pure (Done unit)
+        | otherwise = do
+            tokIds <- arrayInt1D [ s.last ]
+            { newCache, logits } <-
+              forwardCachedWithHead cfg weights head rope s.cache s.pos tokIds
+            dispose tokIds
+            { token: nextTok, next: nextSampler } <- withLastRow logits (runSampler s.sampler)
+            report nextTok
+            Ref.modify_ (\xs -> Array.snoc xs nextTok) finalCtxRef
+            if stop nextTok then do
+              Ref.write newCache finalCacheRef
+              pure (Done unit)
+            else
+              pure $ Loop
+                { remaining: s.remaining - 1
+                , pos: s.pos + 1
+                , cache: newCache
+                , sampler: nextSampler
+                , last: nextTok
+                }
+    tailRecM step stepInit
+  finalCache <- Ref.read finalCacheRef
+  traverse_ disposeKVCache finalCache
+  Ref.read finalCtxRef
+
+-- | `decodeLoop` with weight-tied LM head (head = embedding).
+decodeLoop
+  :: ModelConfig
+  -> ModelWeights
+  -> RoPETables
+  -> Sampler
+  -> Reporter
+  -> StopCond
+  -> Array Int
+  -> Int
+  -> Effect (Array Int)
+decodeLoop cfg weights rope =
+  decodeLoopWithHead cfg weights weights.embedding rope
+
+disposeKVCache :: KVCache -> Effect Unit
+disposeKVCache kv = do
+  dispose kv.k
+  dispose kv.v
+
+silent :: Reporter
+silent _ = pure unit
+
+noStop :: StopCond
+noStop _ = false
+
+-- =============================================================================
+-- Sampler builders
+-- =============================================================================
+
+-- | Greedy sampler: argmax of logits; key-irrelevant.
+-- |
+-- | Convention (shared by all samplers): the underlying `sample*`
+-- | helpers (`sampleGreedy` etc.) leave the logits tensor at refcount
+-- | 1 — they ref-bump internally so the caller still owns one
+-- | reference. `withLastRow` is the sole owner of the flat logits and
+-- | disposes after this continuation returns; samplers must NOT
+-- | dispose, or we double-free.
+greedy :: Sampler
+greedy = Sampler \logits -> do
+  token <- sampleGreedy logits
+  pure { token, next: greedy }
+
+-- | Temperature sampler: scales logits by 1/temperature, then draws a
+-- | categorical sample. Splits the seed key on each invocation.
+temperatureSampler :: Key -> Number -> Sampler
+temperatureSampler key temp = Sampler \logits -> do
+  ks <- splitKey2 key
+  token <- sampleTemperature ks.a temp logits
+  pure { token, next: temperatureSampler ks.b temp }
+
+topKSampler :: Key -> Int -> Number -> Sampler
+topKSampler key k temp = Sampler \logits -> do
+  ks <- splitKey2 key
+  token <- sampleTopK ks.a k temp logits
+  pure { token, next: topKSampler ks.b k temp }
+
+topPSampler :: Key -> Number -> Number -> Sampler
+topPSampler key p temp = Sampler \logits -> do
+  ks <- splitKey2 key
+  token <- sampleTopP ks.a p temp logits
+  pure { token, next: topPSampler ks.b p temp }
+
+-- =============================================================================
+-- Pre-baked generation recipes
+-- =============================================================================
+
+-- | Greedy generation, recomputing the full forward at every step
+-- | (O(n²) total, no KV cache). Kept for testing parity with the
+-- | cached variant; production code should use `generateGreedyCached`.
 generateGreedy
   :: ModelConfig
   -> ModelWeights
@@ -55,12 +267,13 @@ generateGreedy cfg weights rope prompt maxNew = go prompt maxNew
     ids <- arrayInt1D ctx
     logits <- forwardLogits cfg weights rope ids
     dispose ids
-    nextId <- sampleLastRow logits
+    nextId <- withLastRow logits \flat -> do
+      idx <- sampleGreedy flat
+      pure idx
     go (Array.snoc ctx nextId) (n - 1)
 
--- | KVCache-accelerated greedy generation. Prefill once, then each decode
--- | step processes only the single new token against the cached K/V —
--- | O(n) decode rather than the O(n²) of `generateGreedy`.
+-- | KVCache-accelerated greedy generation. Prefill once, decode one
+-- | token at a time against the cached K/V. O(n) decode.
 generateGreedyCached
   :: ModelConfig
   -> ModelWeights
@@ -68,336 +281,96 @@ generateGreedyCached
   -> Array Int
   -> Int
   -> Effect (Array Int)
-generateGreedyCached cfg weights rope prompt maxNew = do
-  cache0 <- emptyKVCacheStack cfg
-  -- Prefill on the prompt.
-  promptIds <- arrayInt1D prompt
-  { newCache: cache1, logits: l1 } <-
-    forwardCached cfg weights rope cache0 0 promptIds
-  dispose promptIds
-  firstNew <- sampleLastRow l1
-  let
-    startPos = Array.length prompt
-    ctx0 = Array.snoc prompt firstNew
-  -- Decode loop: one new token per step.
-  final <- iterDecode (maxNew - 1) (startPos + 1) ctx0 cache1
-  -- Dispose final cache (the cache lives across all decode steps).
-  traverse_ disposeKVCache final.cache
-  pure final.ctx
-  where
-  iterDecode
-    :: Int
-    -> Int
-    -> Array Int
-    -> KVCacheStack
-    -> Effect { ctx :: Array Int, cache :: KVCacheStack }
-  iterDecode 0 _ ctx cache = pure { ctx, cache }
-  iterDecode n pos ctx cache = do
-    let lastTok = case Array.last ctx of
-          Just x -> x
-          Nothing -> 0
-    tokIds <- arrayInt1D [ lastTok ]
-    { newCache, logits } <- forwardCached cfg weights rope cache pos tokIds
-    dispose tokIds
-    nextTok <- sampleLastRow logits
-    iterDecode (n - 1) (pos + 1) (Array.snoc ctx nextTok) newCache
+generateGreedyCached cfg weights rope prompt maxNew =
+  decodeLoop cfg weights rope greedy silent noStop prompt maxNew
 
--- | Slice the last row of [seq, vocab] logits, sample greedy, dispose.
--- | Consumes the input logits tensor.
-sampleLastRow :: NDArray D2 -> Effect Int
-sampleLastRow logits = do
-  sh <- shape logits
-  let
-    seqLen = fromMaybe 0 (Array.head sh)
-    vocab = fromMaybe 0 (sh Array.!! 1)
-  logitsR <- ref logits
-  lastRow <- sliceAxis logitsR 0 (seqLen - 1) seqLen
-  dispose logits
-  lastRowR <- ref lastRow
-  flat <- reshape lastRowR [ vocab ] :: Effect (NDArray D1)
-  dispose lastRow
-  idx <- sampleGreedy flat
-  dispose flat
-  pure idx
-
-disposeKVCache :: KVCache -> Effect Unit
-disposeKVCache kv = do
-  dispose kv.k
-  dispose kv.v
-
--- | KVCache-accelerated temperature-sampled generation. Threads a PRNG
--- | key through the decode loop, splitting it at each step.
+-- | KVCache-accelerated temperature-sampled generation.
 generateTemperature
   :: Key
-  -> Number          -- ^ temperature (>0; smaller = sharper)
+  -> Number
   -> ModelConfig
   -> ModelWeights
   -> RoPETables
   -> Array Int
   -> Int
   -> Effect (Array Int)
-generateTemperature initialKey temperature cfg weights rope prompt maxNew = do
-  cache0 <- emptyKVCacheStack cfg
-  promptIds <- arrayInt1D prompt
-  { newCache: cache1, logits: l1 } <-
-    forwardCached cfg weights rope cache0 0 promptIds
-  dispose promptIds
-  -- Split the initial key: one for sampling, one to thread forward.
-  ks <- splitKey2 initialKey
-  firstNew <- sampleLastRowTemp ks.a temperature l1
-  let
-    startPos = Array.length prompt
-    ctx0 = Array.snoc prompt firstNew
-  final <- iterDecode ks.b temperature (maxNew - 1) (startPos + 1) ctx0 cache1
-  traverse_ disposeKVCache final.cache
-  pure final.ctx
-  where
-  iterDecode
-    :: Key
-    -> Number
-    -> Int
-    -> Int
-    -> Array Int
-    -> KVCacheStack
-    -> Effect { ctx :: Array Int, cache :: KVCacheStack }
-  iterDecode _ _ 0 _ ctx cache = pure { ctx, cache }
-  iterDecode key temp n pos ctx cache = do
-    let lastTok = case Array.last ctx of
-          Just x -> x
-          Nothing -> 0
-    tokIds <- arrayInt1D [ lastTok ]
-    { newCache, logits } <- forwardCached cfg weights rope cache pos tokIds
-    dispose tokIds
-    ks <- splitKey2 key
-    nextTok <- sampleLastRowTemp ks.a temp logits
-    iterDecode ks.b temp (n - 1) (pos + 1) (Array.snoc ctx nextTok) newCache
+generateTemperature key temperature cfg weights rope =
+  decodeLoop cfg weights rope (temperatureSampler key temperature) silent noStop
 
--- | Slice last row → temperature-sample. Consumes `key` and `logits`.
-sampleLastRowTemp :: Key -> Number -> NDArray D2 -> Effect Int
-sampleLastRowTemp key temp logits = do
-  sh <- shape logits
-  let
-    seqLen = fromMaybe 0 (Array.head sh)
-    vocab = fromMaybe 0 (sh Array.!! 1)
-  logitsR <- ref logits
-  lastRow <- sliceAxis logitsR 0 (seqLen - 1) seqLen
-  dispose logits
-  lastRowR <- ref lastRow
-  flat <- reshape lastRowR [ vocab ] :: Effect (NDArray D1)
-  dispose lastRow
-  idx <- sampleTemperature key temp flat
-  dispose flat
-  pure idx
-
--- | Slice last row → top-k-temperature-sample. Consumes `key` and `logits`.
-sampleLastRowTopK :: Key -> Int -> Number -> NDArray D2 -> Effect Int
-sampleLastRowTopK key k temp logits = do
-  sh <- shape logits
-  let
-    seqLen = fromMaybe 0 (Array.head sh)
-    vocab = fromMaybe 0 (sh Array.!! 1)
-  logitsR <- ref logits
-  lastRow <- sliceAxis logitsR 0 (seqLen - 1) seqLen
-  dispose logits
-  lastRowR <- ref lastRow
-  flat <- reshape lastRowR [ vocab ] :: Effect (NDArray D1)
-  dispose lastRow
-  idx <- sampleTopK key k temp flat
-  dispose flat
-  pure idx
-
--- | KVCache-accelerated top-k temperature sampling.
+-- | KVCache-accelerated top-k sampling.
 generateTopK
   :: Key
-  -> Int           -- ^ k
-  -> Number        -- ^ temperature
+  -> Int
+  -> Number
   -> ModelConfig
   -> ModelWeights
   -> RoPETables
   -> Array Int
   -> Int
   -> Effect (Array Int)
-generateTopK initialKey k temperature cfg weights rope prompt maxNew = do
-  cache0 <- emptyKVCacheStack cfg
-  promptIds <- arrayInt1D prompt
-  { newCache: cache1, logits: l1 } <-
-    forwardCached cfg weights rope cache0 0 promptIds
-  dispose promptIds
-  ks <- splitKey2 initialKey
-  firstNew <- sampleLastRowTopK ks.a k temperature l1
-  let
-    startPos = Array.length prompt
-    ctx0 = Array.snoc prompt firstNew
-  final <- iterDecode ks.b k temperature (maxNew - 1) (startPos + 1) ctx0 cache1
-  traverse_ disposeKVCache final.cache
-  pure final.ctx
-  where
-  iterDecode
-    :: Key
-    -> Int
-    -> Number
-    -> Int
-    -> Int
-    -> Array Int
-    -> KVCacheStack
-    -> Effect { ctx :: Array Int, cache :: KVCacheStack }
-  iterDecode _ _ _ 0 _ ctx cache = pure { ctx, cache }
-  iterDecode key kk temp n pos ctx cache = do
-    let lastTok = case Array.last ctx of
-          Just x -> x
-          Nothing -> 0
-    tokIds <- arrayInt1D [ lastTok ]
-    { newCache, logits } <- forwardCached cfg weights rope cache pos tokIds
-    dispose tokIds
-    ks <- splitKey2 key
-    nextTok <- sampleLastRowTopK ks.a kk temp logits
-    iterDecode ks.b kk temp (n - 1) (pos + 1) (Array.snoc ctx nextTok) newCache
+generateTopK key k temperature cfg weights rope =
+  decodeLoop cfg weights rope (topKSampler key k temperature) silent noStop
 
--- | KVCache-accelerated top-p (nucleus) temperature sampling.
+-- | KVCache-accelerated top-p (nucleus) sampling.
 generateTopP
   :: Key
-  -> Number        -- ^ p (e.g. 0.9)
-  -> Number        -- ^ temperature
+  -> Number
+  -> Number
   -> ModelConfig
   -> ModelWeights
   -> RoPETables
   -> Array Int
   -> Int
   -> Effect (Array Int)
-generateTopP initialKey p temperature cfg weights rope prompt maxNew = do
-  cache0 <- emptyKVCacheStack cfg
-  promptIds <- arrayInt1D prompt
-  { newCache: cache1, logits: l1 } <-
-    forwardCached cfg weights rope cache0 0 promptIds
-  dispose promptIds
-  ks <- splitKey2 initialKey
-  firstNew <- sampleLastRowTopP ks.a p temperature l1
-  let
-    startPos = Array.length prompt
-    ctx0 = Array.snoc prompt firstNew
-  final <- iterDecode ks.b p temperature (maxNew - 1) (startPos + 1) ctx0 cache1
-  traverse_ disposeKVCache final.cache
-  pure final.ctx
-  where
-  iterDecode
-    :: Key
-    -> Number
-    -> Number
-    -> Int
-    -> Int
-    -> Array Int
-    -> KVCacheStack
-    -> Effect { ctx :: Array Int, cache :: KVCacheStack }
-  iterDecode _ _ _ 0 _ ctx cache = pure { ctx, cache }
-  iterDecode key pp temp n pos ctx cache = do
-    let lastTok = case Array.last ctx of
-          Just x -> x
-          Nothing -> 0
-    tokIds <- arrayInt1D [ lastTok ]
-    { newCache, logits } <- forwardCached cfg weights rope cache pos tokIds
-    dispose tokIds
-    ks <- splitKey2 key
-    nextTok <- sampleLastRowTopP ks.a pp temp logits
-    iterDecode ks.b pp temp (n - 1) (pos + 1) (Array.snoc ctx nextTok) newCache
+generateTopP key p temperature cfg weights rope =
+  decodeLoop cfg weights rope (topPSampler key p temperature) silent noStop
 
--- | Slice last row → top-p sample. Consumes `key` and `logits`.
-sampleLastRowTopP :: Key -> Number -> Number -> NDArray D2 -> Effect Int
-sampleLastRowTopP key p temp logits = do
-  sh <- shape logits
-  let
-    seqLen = fromMaybe 0 (Array.head sh)
-    vocab = fromMaybe 0 (sh Array.!! 1)
-  logitsR <- ref logits
-  lastRow <- sliceAxis logitsR 0 (seqLen - 1) seqLen
-  dispose logits
-  lastRowR <- ref lastRow
-  flat <- reshape lastRowR [ vocab ] :: Effect (NDArray D1)
-  dispose lastRow
-  idx <- sampleTopP key p temp flat
-  dispose flat
-  pure idx
+-- =============================================================================
+-- Streaming variants
+-- =============================================================================
 
--- | KVCache-accelerated greedy generation that streams each new token to
--- | a user-supplied callback. The callback is called once per new token,
--- | in order — useful for incremental rendering of generation.
+-- | Greedy generation that streams each new token to a callback in order.
 generateGreedyCachedStream
   :: ModelConfig
   -> ModelWeights
   -> RoPETables
-  -> Array Int       -- ^ prompt
-  -> Int             -- ^ maxNew
-  -> (Int -> Effect Unit)  -- ^ called once per generated token id
+  -> Array Int
+  -> Int
+  -> (Int -> Effect Unit)
   -> Effect Unit
 generateGreedyCachedStream cfg weights rope prompt maxNew onToken =
   generateGreedyCachedStreamUntil cfg weights rope Nothing prompt maxNew onToken
 
--- | KVCache-accelerated greedy generation that streams each new token to
--- | a callback and stops early when the EOS id is sampled. Pass
--- | `Nothing` for `eosId` to disable early stopping (matches
--- | `generateGreedyCachedStream`).
--- |
--- | The EOS token *is* delivered to the callback before the loop
--- | terminates — callers can choose to render or hide it.
+-- | Greedy streaming with optional EOS-aware early stop. The EOS token
+-- | is delivered to the callback before the loop terminates.
 generateGreedyCachedStreamUntil
   :: ModelConfig
   -> ModelWeights
   -> RoPETables
-  -> Maybe Int       -- ^ eos id (Nothing = no early stop)
-  -> Array Int       -- ^ prompt
-  -> Int             -- ^ maxNew
+  -> Maybe Int
+  -> Array Int
+  -> Int
   -> (Int -> Effect Unit)
   -> Effect Unit
 generateGreedyCachedStreamUntil cfg weights rope eosId prompt maxNew onToken =
   generateGreedyCachedStreamUntilWithHead
     cfg weights weights.embedding rope eosId prompt maxNew onToken
 
--- | `generateGreedyCachedStreamUntil` with an explicit LM-head projection
--- | matrix. Use when the loaded checkpoint has `tie_word_embeddings: false`
--- | and ships a separate `lm_head.weight`. For tied checkpoints, the
--- | callers above pass `weights.embedding` and get the original behaviour.
+-- | Greedy streaming with EOS + an explicit LM-head matrix (for
+-- | checkpoints with `tie_word_embeddings: false`).
 generateGreedyCachedStreamUntilWithHead
   :: ModelConfig
   -> ModelWeights
-  -> NDArray D2          -- ^ LM-head projection [vocab, hidden]
+  -> NDArray D2
   -> RoPETables
-  -> Maybe Int           -- ^ eos id (Nothing = no early stop)
+  -> Maybe Int
   -> Array Int
   -> Int
   -> (Int -> Effect Unit)
   -> Effect Unit
-generateGreedyCachedStreamUntilWithHead
-  cfg weights head rope eosId prompt maxNew onToken = do
-  cache0 <- emptyKVCacheStack cfg
-  promptIds <- arrayInt1D prompt
-  { newCache: cache1, logits: l1 } <-
-    forwardCachedWithHead cfg weights head rope cache0 0 promptIds
-  dispose promptIds
-  firstNew <- sampleLastRow l1
-  onToken firstNew
-  let
-    startPos = Array.length prompt
-    isEos = case eosId of
-      Just e -> firstNew == e
-      Nothing -> false
-  finalCache <-
-    if isEos then pure cache1
-    else streamLoop firstNew (startPos + 1) (maxNew - 1) cache1
-  traverse_ disposeKVCache finalCache
+generateGreedyCachedStreamUntilWithHead cfg weights head rope eosId prompt maxNew onToken =
+  void $ decodeLoopWithHead cfg weights head rope greedy onToken stopFn prompt maxNew
   where
-  streamLoop
-    :: Int
-    -> Int
-    -> Int
-    -> KVCacheStack
-    -> Effect KVCacheStack
-  streamLoop _ _ 0 cache = pure cache
-  streamLoop lastTok pos n cache = do
-    tokIds <- arrayInt1D [ lastTok ]
-    { newCache, logits } <-
-      forwardCachedWithHead cfg weights head rope cache pos tokIds
-    dispose tokIds
-    nextTok <- sampleLastRow logits
-    onToken nextTok
-    case eosId of
-      Just e | nextTok == e -> pure newCache
-      _ -> streamLoop nextTok (pos + 1) (n - 1) newCache
+  stopFn = case eosId of
+    Just e -> (_ == e)
+    Nothing -> noStop
