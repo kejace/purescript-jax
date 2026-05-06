@@ -5,6 +5,8 @@
         "path": "./",
         "core": {
           "dependencies": [
+            "aff",
+            "aff-promise",
             "argonaut-core",
             "arrays",
             "codec-argonaut",
@@ -20,6 +22,8 @@
             "tuples"
           ],
           "build_plan": [
+            "aff",
+            "aff-promise",
             "argonaut-core",
             "arrays",
             "bifunctors",
@@ -29,6 +33,7 @@
             "const",
             "contravariant",
             "control",
+            "datetime",
             "distributive",
             "effect",
             "either",
@@ -52,6 +57,7 @@
             "numbers",
             "ordered-collections",
             "orders",
+            "parallel",
             "partial",
             "prelude",
             "profunctor",
@@ -594,6 +600,42 @@
     "extra_packages": {}
   },
   "packages": {
+    "aff": {
+      "type": "registry",
+      "version": "8.0.0",
+      "integrity": "sha256-9BRIrSdRoYybfiUmBqgKJ66cPqxYHb277bVWQMn/9sg=",
+      "dependencies": [
+        "control",
+        "datetime",
+        "effect",
+        "either",
+        "exceptions",
+        "functions",
+        "newtype",
+        "parallel",
+        "partial",
+        "prelude",
+        "st",
+        "tailrec",
+        "transformers",
+        "unsafe-coerce"
+      ]
+    },
+    "aff-promise": {
+      "type": "registry",
+      "version": "4.0.0",
+      "integrity": "sha256-Jgp3y+NWuuAmwz2V3LlWoX+AvxqfVglY77N5zTw8xnI=",
+      "dependencies": [
+        "aff",
+        "control",
+        "effect",
+        "either",
+        "exceptions",
+        "foreign",
+        "prelude",
+        "transformers"
+      ]
+    },
     "argonaut-core": {
       "type": "registry",
       "version": "7.0.0",
@@ -724,6 +766,29 @@
       "dependencies": [
         "newtype",
         "prelude"
+      ]
+    },
+    "datetime": {
+      "type": "registry",
+      "version": "6.1.0",
+      "integrity": "sha256-tbv6eDXy6QOD7YSknxYSbsDF32OC2JrNbSBpzMs7Doc=",
+      "dependencies": [
+        "bifunctors",
+        "control",
+        "either",
+        "enums",
+        "foldable-traversable",
+        "functions",
+        "gen",
+        "integers",
+        "lists",
+        "maybe",
+        "newtype",
+        "numbers",
+        "ordered-collections",
+        "partial",
+        "prelude",
+        "tuples"
       ]
     },
     "distributive": {
@@ -1023,6 +1088,24 @@
       "dependencies": [
         "newtype",
         "prelude"
+      ]
+    },
+    "parallel": {
+      "type": "registry",
+      "version": "7.0.0",
+      "integrity": "sha256-bAGpVhrFz2IyHkA4MR7+tE/19FZ7dzYBdYPgK5svkqw=",
+      "dependencies": [
+        "control",
+        "effect",
+        "either",
+        "foldable-traversable",
+        "functors",
+        "maybe",
+        "newtype",
+        "prelude",
+        "profunctor",
+        "refs",
+        "transformers"
       ]
     },
     "partial": {

@@ -10,6 +10,8 @@ import Data.Function.Uncurried (Fn3, runFn3)
 import Data.Maybe (Maybe(..))
 import Data.String (length, take) as String
 import Effect (Effect)
+import Effect.Aff (attempt, launchAff_)
+import Effect.Class (liftEffect)
 import Effect.Console (log)
 import Effect.Exception (message, try)
 import Effect.Ref (Ref)
@@ -120,98 +122,87 @@ main = do
 
 -- Model loading -------------------------------------------------------------
 
+-- | Load weights + tokenizer + config in a single linear `Aff`
+-- | computation. `attempt` catches Aff errors (fetch failures, decoder
+-- | errors) and surfaces them through `LoadError`. The previous
+-- | callback-style implementation needed 5 levels of nesting and three
+-- | separate `onErr` handlers; this is one flat `do`.
 handleLoadModel :: Ref (Maybe LoadedModel) -> String -> String -> Effect Unit
 handleLoadModel modelRef weightsUrl tokenizerUrl = do
   log $ "[worker] loadModel weights=" <> weightsUrl
     <> " tokenizer=" <> tokenizerUrl
   post (LoadStart { url: weightsUrl })
-  start <- performanceNow
   let configUrl = configUrlFromWeights weightsUrl
-  -- Step 1: fetch config.json
-  fetchText configUrl
-    ( \configJson -> do
-        cfg <- parseLlamaConfig configJson
-        log $ "[worker] config: hidden=" <> show cfg.hidden
-          <> " nHeads=" <> show cfg.nHeads
-          <> " nKvHeads=" <> show cfg.nKvHeads
-          <> " nLayers=" <> show cfg.nLayers
-          <> " vocab=" <> show cfg.vocabSize
-        post $ LoadConfigMsg
-          { hidden: cfg.hidden
-          , nHeads: cfg.nHeads
-          , nKvHeads: cfg.nKvHeads
-          , nLayers: cfg.nLayers
-          , vocab: cfg.vocabSize
-          }
-        -- Step 2: fetch tokenizer.model
-        fetchBytes tokenizerUrl
-          ( \tokBytes -> do
-              tokenizer <- SBPE.fromBinary tokBytes
-              -- HF Llama (non-legacy) tokenizer: skip the dummy prefix.
-              SBPE.setAddDummyPrefix tokenizer false
-              log $ "[worker] tokenizer loaded · vocabSize="
-                <> show (SBPE.vocabSize tokenizer)
-              post (LoadTokenizer { vocabSize: SBPE.vocabSize tokenizer })
-              -- Step 3: fetch model.safetensors
-              fetchBytes weightsUrl
-                ( \bytes -> do
-                    fetched <- performanceNow
-                    log $ "[worker] fetched safetensors in "
-                      <> show (fetched - start) <> " ms; parsing"
-                    post $ LoadFetched
-                      { url: weightsUrl, fetchMs: fetched - start }
-                    result <- try do
-                      parsed <- parseSafetensors bytes
-                      names <- tensorNames parsed
-                      parsedAt <- performanceNow
-                      ckpt <- loadLlamaWeights cfg parsed
-                      rope <- precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta
-                      adaptedAt <- performanceNow
-                      pure { ckpt, rope, names, parsedAt, adaptedAt }
-                    case result of
-                      Left e -> do
-                        let err = message e
-                        log $ "[worker] parse/adapt failed: " <> err
-                        post $ LoadError
-                          { url: weightsUrl, err: "parse/adapt: " <> err }
-                      Right r -> do
-                        Ref.write
-                          ( Just
-                              { weights: r.ckpt.weights
-                              , lmHead: r.ckpt.lmHead
-                              , rope: r.rope
-                              , cfg
-                              , tokenizer
-                              }
-                          )
-                          modelRef
-                        log $ "[worker] adapted "
-                          <> show (arrayLength r.names) <> " tensors → ModelWeights in "
-                          <> show (r.adaptedAt - r.parsedAt) <> " ms"
-                        post $ LoadDone
-                          { url: weightsUrl
-                          , tensorCount: arrayLength r.names
-                          , parseMs: r.parsedAt - fetched
-                          , adaptMs: r.adaptedAt - r.parsedAt
-                          , totalMs: r.adaptedAt - start
-                          }
-                )
-                ( \err -> do
-                    log $ "[worker] safetensors fetch failed: " <> err
-                    post (LoadError { url: weightsUrl, err })
-                )
-          )
-          ( \err -> do
-              log $ "[worker] tokenizer.model fetch failed: " <> err
-              post $ LoadError
-                { url: tokenizerUrl, err: "tokenizer.model: " <> err }
-          )
-    )
-    ( \err -> do
-        log $ "[worker] config.json fetch failed: " <> err
-        post $ LoadError
-          { url: configUrl, err: "config.json: " <> err }
-    )
+  launchAff_ do
+    start <- liftEffect performanceNow
+    result <- attempt do
+      configJson <- fetchText configUrl
+      cfg <- liftEffect $ parseLlamaConfig configJson
+      liftEffect $ log $ "[worker] config: hidden=" <> show cfg.hidden
+        <> " nHeads=" <> show cfg.nHeads
+        <> " nKvHeads=" <> show cfg.nKvHeads
+        <> " nLayers=" <> show cfg.nLayers
+        <> " vocab=" <> show cfg.vocabSize
+      liftEffect $ post $ LoadConfigMsg
+        { hidden: cfg.hidden
+        , nHeads: cfg.nHeads
+        , nKvHeads: cfg.nKvHeads
+        , nLayers: cfg.nLayers
+        , vocab: cfg.vocabSize
+        }
+      -- Tokenizer.
+      tokBytes <- fetchBytes tokenizerUrl
+      tokenizer <- liftEffect $ SBPE.fromBinary tokBytes
+      liftEffect $ SBPE.setAddDummyPrefix tokenizer false
+      liftEffect $ log $ "[worker] tokenizer loaded · vocabSize="
+        <> show (SBPE.vocabSize tokenizer)
+      liftEffect $ post (LoadTokenizer { vocabSize: SBPE.vocabSize tokenizer })
+      -- Weights.
+      bytes <- fetchBytes weightsUrl
+      fetched <- liftEffect performanceNow
+      liftEffect $ log $ "[worker] fetched safetensors in "
+        <> show (fetched - start) <> " ms; parsing"
+      liftEffect $ post $ LoadFetched
+        { url: weightsUrl, fetchMs: fetched - start }
+      -- Parse + adapt are pure Effect; wrap with try so adapter errors
+      -- (missing tensor key, dtype mismatch) round-trip out as Aff
+      -- error messages too.
+      r <- liftEffect $ try do
+        parsed <- parseSafetensors bytes
+        names <- tensorNames parsed
+        parsedAt <- performanceNow
+        ckpt <- loadLlamaWeights cfg parsed
+        rope <- precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta
+        adaptedAt <- performanceNow
+        pure { ckpt, rope, names, parsedAt, adaptedAt }
+      case r of
+        Left e -> liftEffect $ post $ LoadError
+          { url: weightsUrl, err: "parse/adapt: " <> message e }
+        Right ok -> liftEffect do
+          Ref.write
+            ( Just
+                { weights: ok.ckpt.weights
+                , lmHead: ok.ckpt.lmHead
+                , rope: ok.rope
+                , cfg
+                , tokenizer
+                }
+            )
+            modelRef
+          log $ "[worker] adapted "
+            <> show (arrayLength ok.names) <> " tensors → ModelWeights in "
+            <> show (ok.adaptedAt - ok.parsedAt) <> " ms"
+          post $ LoadDone
+            { url: weightsUrl
+            , tensorCount: arrayLength ok.names
+            , parseMs: ok.parsedAt - fetched
+            , adaptMs: ok.adaptedAt - ok.parsedAt
+            , totalMs: ok.adaptedAt - start
+            }
+    case result of
+      Left e -> liftEffect $ post $ LoadError
+        { url: weightsUrl, err: message e }
+      Right _ -> pure unit
 
 -- | Derive the config.json URL from a model.safetensors URL by string
 -- | replacement. Works for HuggingFace's `resolve/main/...` paths.

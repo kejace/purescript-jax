@@ -1,6 +1,8 @@
 package:
   name: jax
   dependencies:
+    - aff
+    - aff-promise
     - argonaut-core
     - arrays
     - codec-argonaut

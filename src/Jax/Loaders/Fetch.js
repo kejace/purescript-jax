@@ -83,6 +83,15 @@ async function fetchOrCached(url) {
   return bytes;
 }
 
+// Aff-style: return the Promise directly. PS-side `toAffE` from
+// `aff-promise` adapts it into Aff (with cancellation + error
+// propagation through the Aff fiber).
+export const fetchBytesAffImpl = (url) => fetchOrCached(url);
+
+export const fetchTextAffImpl = (url) =>
+  fetchOrCached(url).then((bytes) => new TextDecoder().decode(bytes));
+
+// Legacy callback API (kept until callers migrate).
 export const fetchBytesImpl = (url, onOk, onErr) => {
   fetchOrCached(url)
     .then((bytes) => onOk(bytes)())
