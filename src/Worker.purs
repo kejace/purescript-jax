@@ -13,13 +13,13 @@ import Effect (Effect)
 import Effect.Aff (attempt, launchAff_)
 import Effect.Class (liftEffect)
 import Effect.Console (log)
-import Effect.Exception (message, try)
+import Effect.Exception (message, throw, try)
 import Effect.Ref (Ref)
 import Effect.Ref as Ref
 import Effect.Uncurried (EffectFn1, runEffectFn1)
 import Jax.Coerce (asArray1D, asArray1DInt)
 import Jax.Core (D1, D2, NDArray, arrayInt1D, dimAt, dispose, linspace, ref, reshape, sliceAxis, toJs, topK)
-import Jax.Loaders.Config (parseLlamaConfig)
+import Jax.Loaders.Config (parseLlamaConfig, probeRawExtras)
 import Jax.Loaders.Fetch (fetchBytes, fetchText)
 import Jax.Loaders.LlamaAdapter (loadLlamaWeights)
 import Jax.Loaders.Safetensors (parseSafetensors, tensorNames)
@@ -146,6 +146,19 @@ handleLoadModel modelRef weightsUrl tokenizerUrl = do
     start <- liftEffect performanceNow
     result <- attempt do
       configJson <- fetchText configUrl
+      -- Compatibility check: refuse Phi/Qwen2/etc. before we do
+      -- anything irreversible. probeRawExtras is a lightweight
+      -- decode that returns Left with an explanation if model_type
+      -- isn't in `compatibleArchs`.
+      case probeRawExtras configJson of
+        Left err -> liftEffect $ throw $ "config compat: " <> err
+        Right extras -> liftEffect do
+          case extras.sliding_window of
+            Just w | w > 0 -> log $ "[worker] note: sliding_window="
+              <> show w
+              <> " set in config but not enforced; outputs on prompts "
+              <> "longer than this may diverge from reference."
+            _ -> pure unit
       cfg <- liftEffect $ parseLlamaConfig configJson
       liftEffect $ log $ "[worker] config: hidden=" <> show cfg.hidden
         <> " nHeads=" <> show cfg.nHeads
