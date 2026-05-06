@@ -1,3 +1,11 @@
+-- | Transformer block + full-stack forwards. Internal helpers run in
+-- | `Forward = ReaderT { cfg :: ModelConfig } Effect`, removing
+-- | `cfg` from every internal signature; public functions
+-- | (`forwardLogits`, `forwardCached`, etc.) keep their Effect-typed
+-- | API and `runReaderT` once at the entry point.
+-- |
+-- | `T.run` is `MonadEffect`-polymorphic, so DSL operations don't need
+-- | `liftEffect` inside `Forward`.
 module Jax.NN.Block
   ( ModelConfig
   , AttentionWeights
@@ -16,20 +24,19 @@ module Jax.NN.Block
 
 import Prelude hiding (add)
 
-import Data.Array (head, snoc, zip) as Array
+import Control.Monad.Reader.Trans (ReaderT, ask, runReaderT)
+import Data.Array (snoc, zip) as Array
 import Data.Foldable (foldM)
-import Data.Maybe (fromMaybe)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
+import Effect.Class (liftEffect)
 import Jax.Core
   ( D1
   , D2
   , D3
   , NDArray
-  , add
   , concatAxis
   , dimAt
-  , matmul
   , ref
   , repeatAxis
   , reshape
@@ -37,11 +44,11 @@ import Jax.Core
   , zeros
   )
 import Jax.NN.Attention (KVCache, KVCacheStack, attention, attentionNoMask)
-import Jax.Tensor as T
 import Jax.NN.Embed (embed, unembed)
 import Jax.NN.MLP (mlp)
 import Jax.NN.RMSNorm (rmsnorm)
 import Jax.NN.RoPE (RoPETables, applyRoPE)
+import Jax.Tensor as T
 
 -- | Static model hyperparameters (no tensors here).
 type ModelConfig =
@@ -92,63 +99,64 @@ type ModelWeights =
   , finalNorm :: NDArray D1  -- [hidden]
   }
 
+-- =============================================================================
+-- Internal: Forward = ReaderT { cfg } Effect
+-- =============================================================================
+
+type Env = { cfg :: ModelConfig }
+type Forward = ReaderT Env Effect
+
 -- | Repeat-interleave kv heads up to n_q heads. Shape transformation:
 -- |   `[seq, n_kv, head_dim]` → `[seq, n_q, head_dim]`
 -- | where each kv head is duplicated G = n_q / n_kv times consecutively.
 -- | No-op when n_kv == n_q. Consumes its argument.
-expandKV :: ModelConfig -> NDArray D3 -> Effect (NDArray D3)
-expandKV cfg x =
+expandKV :: NDArray D3 -> Forward (NDArray D3)
+expandKV x = do
+  { cfg } <- ask
   if cfg.nHeads == cfg.nKvHeads then pure x
-  else repeatAxis x (cfg.nHeads / cfg.nKvHeads) 1
+  else liftEffect $ repeatAxis x (cfg.nHeads / cfg.nKvHeads) 1
 
 -- | Attention sub-block: norm + Q/K/V projection + RoPE + SDPA + output
 -- | projection. Returns the same shape as the (already-normed) input.
 attentionForward
-  :: ModelConfig
-  -> AttentionWeights
+  :: AttentionWeights
   -> Int          -- seqLen
   -> NDArray D3   -- cos slice, broadcast-shaped [seq, 1, head_dim/2]
   -> NDArray D3   -- sin slice, same
   -> NDArray D2   -- x_normed [seq, hidden]
-  -> Effect (NDArray D2)
-attentionForward cfg w seqLen cosSlice sinSlice xNormed = do
+  -> Forward (NDArray D2)
+attentionForward w seqLen cosSlice sinSlice xNormed = do
+  { cfg } <- ask
   let halfDim = cfg.headDim / 2
       qDim = cfg.nHeads * cfg.headDim
       xT = T.lit xNormed
-  -- Q/K/V projection + reshape — each `T.lit xT` re-runs `ref`, so
-  -- xNormed itself stays at refcount 1 even though it's used three
-  -- times. Operator `**.` is the matmul.
   q <- T.run (T.reshapeT (xT T.**. T.lit w.wq) [ seqLen, cfg.nHeads, cfg.headDim ])
   k <- T.run (T.reshapeT (xT T.**. T.lit w.wk) [ seqLen, cfg.nKvHeads, cfg.headDim ])
   v <- T.run (T.reshapeT (xT T.**. T.lit w.wv) [ seqLen, cfg.nKvHeads, cfg.headDim ])
-  -- RoPE on Q and K (rank-polymorphic; cos/sin already shaped to broadcast).
-  qRot <- applyRoPE halfDim q cosSlice sinSlice
-  kRot <- applyRoPE halfDim k cosSlice sinSlice
-  -- GQA expansion: pre-repeat-interleave kv heads up to n_q heads so
-  -- jax-js's SDPA sees N == K and skips its internal `tile`-based
-  -- expansion (which uses the wrong head pairing for HF Llama).
-  kFull <- expandKV cfg kRot
-  vFull <- expandKV cfg v
-  attnOut <- attention qRot kFull vFull
+  qRot <- liftEffect $ applyRoPE halfDim q cosSlice sinSlice
+  kRot <- liftEffect $ applyRoPE halfDim k cosSlice sinSlice
+  kFull <- expandKV kRot
+  vFull <- expandKV v
+  attnOut <- liftEffect $ attention qRot kFull vFull
   T.run (T.reshapeT (T.lit attnOut) [ seqLen, qDim ] T.**. T.lit w.wo)
 
 -- | One transformer block with residuals:
 -- |   h = x + attention(rmsnorm(x))
 -- |   y = h + mlp(rmsnorm(h))
 transformerBlock
-  :: ModelConfig
-  -> LayerWeights
+  :: LayerWeights
   -> Int           -- seqLen
   -> NDArray D3    -- cos slice
   -> NDArray D3    -- sin slice
   -> NDArray D2    -- x [seq, hidden]
-  -> Effect (NDArray D2)
-transformerBlock cfg lw seqLen cosSlice sinSlice x = do
-  xNormed <- rmsnorm cfg.normEps x lw.attnNorm
-  attnOut <- attentionForward cfg lw.attn seqLen cosSlice sinSlice xNormed
+  -> Forward (NDArray D2)
+transformerBlock lw seqLen cosSlice sinSlice x = do
+  { cfg } <- ask
+  xNormed <- liftEffect $ rmsnorm cfg.normEps x lw.attnNorm
+  attnOut <- attentionForward lw.attn seqLen cosSlice sinSlice xNormed
   h <- T.run (T.lit x T.+. T.lit attnOut)
-  hNormed <- rmsnorm cfg.normEps h lw.mlpNorm
-  mlpOut <- mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
+  hNormed <- liftEffect $ rmsnorm cfg.normEps h lw.mlpNorm
+  mlpOut <- liftEffect $ mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
   T.run (T.lit h T.+. T.lit mlpOut)
 
 -- | Full stack: embed → n × transformerBlock → finalNorm. Returns the
@@ -180,9 +188,6 @@ transformerBlocksAndNorm cfg w rope seqLen hidden0 = do
   let halfDim = cfg.headDim / 2
   -- Slice axis 0 (seq dim) of the precomputed RoPE tables and reshape
   -- to broadcast against the per-head tensor `[seq, n_heads, head_dim]`.
-  -- sliceAxis isn't in the Tensor DSL (axis-N slicing has rank
-  -- implications the DSL deliberately abstracts away); kept as raw
-  -- Core for these two single-op chains.
   cosFullR <- ref rope.cos
   cosSlice2 <- sliceAxis cosFullR 0 0 seqLen
   cosSlice3 <- reshape cosSlice2 [ seqLen, 1, halfDim ]
@@ -190,7 +195,9 @@ transformerBlocksAndNorm cfg w rope seqLen hidden0 = do
   sinSlice2 <- sliceAxis sinFullR 0 0 seqLen
   sinSlice3 <- reshape sinSlice2 [ seqLen, 1, halfDim ]
   hiddenN <- foldM
-    (\h lw -> transformerBlock cfg lw seqLen cosSlice3 sinSlice3 h)
+    (\h lw -> runReaderT
+        (transformerBlock lw seqLen cosSlice3 sinSlice3 h)
+        { cfg })
     hidden0
     w.layers
   rmsnorm cfg.normEps hiddenN w.finalNorm
@@ -255,44 +262,37 @@ traverseN n f = go 0 []
 
 -- | Attention sub-block with KVCache. Computes new K/V for the new tokens,
 -- | concatenates with the cached K/V along the seq axis, runs causal SDPA
--- | over the full K/V, and projects back. Returns the attention output
--- | and the *new* cache (the previous cache's K/V tensors are consumed
--- | by the concat operations and become part of the returned cache).
+-- | over the full K/V, and projects back.
 attentionForwardCached
-  :: ModelConfig
-  -> AttentionWeights
+  :: AttentionWeights
   -> Int           -- newSeq
   -> NDArray D3    -- cos slice for the new positions
   -> NDArray D3    -- sin slice for the new positions
   -> KVCache       -- previous cache
   -> NDArray D2    -- x_normed [newSeq, hidden]
-  -> Effect { newCache :: KVCache, output :: NDArray D2 }
-attentionForwardCached cfg w newSeq cosSlice sinSlice prevCache xNormed = do
+  -> Forward { newCache :: KVCache, output :: NDArray D2 }
+attentionForwardCached w newSeq cosSlice sinSlice prevCache xNormed = do
+  { cfg } <- ask
   let halfDim = cfg.headDim / 2
       qDim = cfg.nHeads * cfg.headDim
       xT = T.lit xNormed
-  -- Q/K/V projection + reshape (xT used three times → three ref bumps).
   q <- T.run (T.reshapeT (xT T.**. T.lit w.wq) [ newSeq, cfg.nHeads, cfg.headDim ])
   newK <- T.run (T.reshapeT (xT T.**. T.lit w.wk) [ newSeq, cfg.nKvHeads, cfg.headDim ])
   newV <- T.run (T.reshapeT (xT T.**. T.lit w.wv) [ newSeq, cfg.nKvHeads, cfg.headDim ])
-  -- RoPE on Q and (new) K only — cached K already had RoPE applied.
-  qRot <- applyRoPE halfDim q cosSlice sinSlice
-  newKRot <- applyRoPE halfDim newK cosSlice sinSlice
-  -- Concat with cache along axis 0 (the seq axis).
-  fullK <- concatAxis [ prevCache.k, newKRot ] 0
-  fullV <- concatAxis [ prevCache.v, newV ] 0
-  -- We'll need fullK and fullV both for attention AND to retain in the
-  -- new cache, so bump them once before handing into attention.
-  fullKRA <- ref fullK
-  fullVRA <- ref fullV
-  fullKExp <- expandKV cfg fullKRA
-  fullVExp <- expandKV cfg fullVRA
-  -- Mask choice: prefill (newSeq == kvSeq) gets a standard causal
-  -- mask; decode (newSeq < kvSeq) needs *no* mask, since jax-js's
-  -- isCausal aligns Q/K at position 0 and would mask the decode query
-  -- down to seeing only K[0] — a known degenerate loop.
-  kvSeq <- dimAt fullK 0
-  attnOut <-
+  qRot <- liftEffect $ applyRoPE halfDim q cosSlice sinSlice
+  newKRot <- liftEffect $ applyRoPE halfDim newK cosSlice sinSlice
+  fullK <- liftEffect $ concatAxis [ prevCache.k, newKRot ] 0
+  fullV <- liftEffect $ concatAxis [ prevCache.v, newV ] 0
+  fullKRA <- liftEffect $ ref fullK
+  fullVRA <- liftEffect $ ref fullV
+  fullKExp <- expandKV fullKRA
+  fullVExp <- expandKV fullVRA
+  -- Mask choice: prefill (newSeq == kvSeq) gets a standard causal mask;
+  -- decode (newSeq < kvSeq) needs *no* mask, since jax-js's isCausal
+  -- aligns Q/K at position 0 and would mask the decode query down to
+  -- seeing only K[0] — a known degenerate loop.
+  kvSeq <- liftEffect $ dimAt fullK 0
+  attnOut <- liftEffect $
     if newSeq == kvSeq
       then attention qRot fullKExp fullVExp
       else attentionNoMask qRot fullKExp fullVExp
@@ -301,21 +301,21 @@ attentionForwardCached cfg w newSeq cosSlice sinSlice prevCache xNormed = do
 
 -- | One transformer block, KVCache-aware.
 transformerBlockCached
-  :: ModelConfig
-  -> LayerWeights
+  :: LayerWeights
   -> Int
   -> NDArray D3
   -> NDArray D3
   -> KVCache
   -> NDArray D2
-  -> Effect { newCache :: KVCache, output :: NDArray D2 }
-transformerBlockCached cfg lw newSeq cosSlice sinSlice prevCache x = do
-  xNormed <- rmsnorm cfg.normEps x lw.attnNorm
+  -> Forward { newCache :: KVCache, output :: NDArray D2 }
+transformerBlockCached lw newSeq cosSlice sinSlice prevCache x = do
+  { cfg } <- ask
+  xNormed <- liftEffect $ rmsnorm cfg.normEps x lw.attnNorm
   { newCache, output: attnOut } <-
-    attentionForwardCached cfg lw.attn newSeq cosSlice sinSlice prevCache xNormed
+    attentionForwardCached lw.attn newSeq cosSlice sinSlice prevCache xNormed
   h <- T.run (T.lit x T.+. T.lit attnOut)
-  hNormed <- rmsnorm cfg.normEps h lw.mlpNorm
-  mlpOut <- mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
+  hNormed <- liftEffect $ rmsnorm cfg.normEps h lw.mlpNorm
+  mlpOut <- liftEffect $ mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
   out <- T.run (T.lit h T.+. T.lit mlpOut)
   pure { newCache, output: out }
 
@@ -348,9 +348,7 @@ forwardCachedWithHead
 forwardCachedWithHead cfg w head rope cache startPos newIds = do
   newSeq <- dimAt newIds 0
   let halfDim = cfg.headDim / 2
-  -- Embed
   hidden0 <- embed w.embedding newIds
-  -- RoPE slices for the new positions only
   cosFullR <- ref rope.cos
   cosSlice2 <- sliceAxis cosFullR 0 startPos (startPos + newSeq)
   cosSlice3 <- reshape cosSlice2 [ newSeq, 1, halfDim ]
@@ -360,7 +358,9 @@ forwardCachedWithHead cfg w head rope cache startPos newIds = do
   let layerPairs = Array.zip w.layers cache
   result <- foldM
     ( \acc (Tuple lw lc) -> do
-        r <- transformerBlockCached cfg lw newSeq cosSlice3 sinSlice3 lc acc.hidden
+        r <- runReaderT
+          (transformerBlockCached lw newSeq cosSlice3 sinSlice3 lc acc.hidden)
+          { cfg }
         pure { hidden: r.output, cachesRev: Array.snoc acc.cachesRev r.newCache }
     )
     { hidden: hidden0, cachesRev: [] }

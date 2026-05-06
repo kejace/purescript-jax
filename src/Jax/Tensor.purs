@@ -64,6 +64,7 @@ import Prelude
 import Data.Array (snoc, uncons)
 import Data.Maybe (Maybe(..))
 import Effect (Effect)
+import Effect.Class (class MonadEffect, liftEffect)
 import Jax.Core (NDArray)
 import Jax.Core as Core
 
@@ -77,8 +78,11 @@ newtype T d = T (Effect (NDArray d))
 -- | Realize a deferred tensor expression into an `NDArray d`. The
 -- | resulting tensor has refcount 1; the caller owns it (typically via
 -- | `Jax.Managed.allocate`).
-run :: forall d. T d -> Effect (NDArray d)
-run (T eff) = eff
+-- |
+-- | Polymorphic in `MonadEffect` so callers in `Aff`, `ReaderT _ Effect`,
+-- | etc. don't need to wrap each `T.run` in `liftEffect`.
+run :: forall m d. MonadEffect m => T d -> m (NDArray d)
+run (T eff) = liftEffect eff
 
 -- | Borrow an existing tensor. Each use of this `T d` ref-bumps the
 -- | underlying handle, so the borrowed tensor stays alive for callers
