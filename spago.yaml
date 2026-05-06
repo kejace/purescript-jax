@@ -12,6 +12,7 @@ package:
     - exceptions
     - foreign
     - functions
+    - heterogeneous
     - maybe
     - prelude
     - transformers

@@ -16,6 +16,7 @@
             "exceptions",
             "foreign",
             "functions",
+            "heterogeneous",
             "maybe",
             "prelude",
             "transformers",
@@ -46,6 +47,7 @@
             "functions",
             "functors",
             "gen",
+            "heterogeneous",
             "identity",
             "integers",
             "invariant",
@@ -1139,6 +1141,20 @@
         "tailrec",
         "tuples",
         "unfoldable"
+      ]
+    },
+    "heterogeneous": {
+      "type": "registry",
+      "version": "0.6.0",
+      "integrity": "sha256-nQgk2iHYe5LIi6ZzREgWaCU3y8oCwdhDSukT6xVMWdk=",
+      "dependencies": [
+        "either",
+        "foldable-traversable",
+        "functors",
+        "prelude",
+        "record",
+        "tuples",
+        "variant"
       ]
     },
     "identity": {

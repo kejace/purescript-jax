@@ -71,6 +71,7 @@ import Test.SafetensorsFixture (makeFixture)
 import Test.BpeFixture as BpeFix
 import Test.LlamaFixture (makeLlamaFixture, llamaFixtureCfg)
 import Jax.Loaders.LlamaAdapter (loadLlamaWeights)
+import Jax.Pytree (countParams, countTensors, sumSquaredL2)
 import Data.Foldable (for_)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -887,7 +888,37 @@ testLlamaEndToEnd = do
   assertEqArrayInt "real-model forwardLogits output [seq=3, vocab=8]"
     [ 3, fcfg.vocab ]
     s
-  log "  ✓ end-to-end safetensors → adapter → forward succeeds"
+  -- Heterogeneous pytree traversal: counting tensors and total params.
+  -- Expected counts (vocab=hidden=8, nHeads=nKvHeads=2, headDim=4,
+  -- intermediate=16, nLayers=1):
+  --   tensors  = embedding (1) + finalNorm (1) + 1 layer × 9
+  --            = 11
+  --   params   = embedding (64) + finalNorm (8)
+  --            + 1 × (attnNorm (8) + 4 attn projs (4×64) + mlpNorm (8)
+  --                  + 3 mlp projs (3×128))
+  --            = 72 + 656 = 728
+  let nTensors = countTensors ckpt.weights
+  assertEqArrayInt "countTensors ckpt.weights" [ 2 + fcfg.nLayers * 9 ] [ nTensors ]
+  nParams <- countParams ckpt.weights
+  let
+    expectedParams = fcfg.vocab * fcfg.hidden + fcfg.hidden + fcfg.nLayers *
+      ( fcfg.hidden                                    -- attnNorm
+          + 2 * (fcfg.hidden * fcfg.nHeads * fcfg.headDim)
+          + 2 * (fcfg.hidden * fcfg.nKvHeads * fcfg.headDim)
+          + fcfg.hidden                                -- mlpNorm
+          + 3 * (fcfg.hidden * fcfg.intermediate)
+      )
+  assertEqArrayInt "countParams ckpt.weights"
+    [ expectedParams ]
+    [ nParams ]
+  -- sumSquaredL2: every leaf is filled with linspace(-0.1, 0.1) values,
+  -- so the magnitude is bounded but non-zero. Just sanity-check that
+  -- it returns a finite positive Number. (We don't pin an exact value
+  -- because the per-leaf linspace ranges depend on each tensor's size.)
+  l2sq <- sumSquaredL2 ckpt.weights
+  if l2sq > 0.0 then log "  ✓ sumSquaredL2 ckpt.weights > 0"
+  else throw $ "  ✗ sumSquaredL2 expected > 0, got " <> show l2sq
+  log "  ✓ end-to-end safetensors → adapter → forward + pytree traversal"
 
 testTransformerTraining :: Effect Unit
 testTransformerTraining = do

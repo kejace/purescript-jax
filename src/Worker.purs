@@ -32,6 +32,7 @@ import Jax.NN.Generate
   , generateGreedyCachedStreamUntilWithHead
   )
 import Jax.NN.RoPE (RoPETables, precomputeRoPE)
+import Jax.Pytree (countParams, countTensors)
 import Jax.Worker.Protocol
   ( WorkerIn(..)
   , WorkerOut(..)
@@ -189,8 +190,16 @@ handleLoadModel modelRef weightsUrl tokenizerUrl = do
                 }
             )
             modelRef
+          -- Heterogeneous-pytree introspection (Jax.Pytree). Replaces
+          -- what would have been an unsafeCoerce-shaped traversal of
+          -- ModelWeights with a typeclass-dispatched fold; both
+          -- counts are compile-time-checked against the record shape.
+          let nTensorsPT = countTensors ok.ckpt.weights
+          nParams <- countParams ok.ckpt.weights
           log $ "[worker] adapted "
-            <> show (arrayLength ok.names) <> " tensors → ModelWeights in "
+            <> show (arrayLength ok.names) <> " tensors → ModelWeights"
+            <> " (" <> show nTensorsPT <> " in pytree, "
+            <> show nParams <> " params) in "
             <> show (ok.adaptedAt - ok.parsedAt) <> " ms"
           post $ LoadDone
             { url: weightsUrl
