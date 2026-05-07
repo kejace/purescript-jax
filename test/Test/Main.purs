@@ -70,6 +70,8 @@ import Test.LlamaFixture (makeLlamaFixture, llamaFixtureCfg)
 import Jax.Loaders.LlamaAdapter (loadLlamaWeights)
 import Jax.Pytree (countParams, countTensors, perLayerL2sq, sumSquaredL2)
 import Jax.Optics (_embedding, _finalNorm)
+import Jax.Loaders.CharTokenizer as CharTokenizer
+import Jax.Optax.Schedule as Schedule
 import Jax.Loaders.Config as Cfg
 import Data.Either (Either(..))
 import Data.String (Pattern(..), indexOf) as StrIdx
@@ -124,9 +126,13 @@ specs = do
   describe "Loaders" do
     it "tokenizer (cl100k_base BPE)" (liftEffect testTokenizer)
     it "SentencePiece BPE parity" (liftEffect testSentencePieceBPE)
+    it "char tokenizer round-trip" (liftEffect testCharTokenizer)
     it "safetensors" (liftEffect testSafetensors)
     it "Llama end-to-end (synthetic fixture)" (liftEffect testLlamaEndToEnd)
     it "HF config decoder (real-world JSON shape)" (liftEffect testHFConfigDecode)
+  describe "Schedules + Train helpers" do
+    it "linearDecay endpoints" (liftEffect testLinearDecay)
+    it "cosineDecay endpoints" (liftEffect testCosineDecay)
   describe "Numerical parity" do
     it "analytic checks" (liftEffect testNumericalParity)
 
@@ -1273,3 +1279,47 @@ testSafetensors = do
       assertCloseArray "BF16 → F32 promoted values"
         [ 1.0, 2.0, -1.0, 0.5 ]
         (asArray1D f)
+
+testCharTokenizer :: Effect Unit
+testCharTokenizer = do
+  log "Char tokenizer:"
+  -- Build from a small corpus. Vocabulary is first-occurrence ordered,
+  -- so we can predict exact indices.
+  let
+    corpus = "abca\nbcd"
+    tok = CharTokenizer.fromText corpus
+    vocabSize = CharTokenizer.size tok
+  -- Distinct chars: 'a', 'b', 'c', '\n', 'd' → vocab=5
+  assertEqArrayInt "char vocab size on 'abca\\nbcd'" [ 5 ] [ vocabSize ]
+  -- Encode follows first-occurrence order: a=0, b=1, c=2, \n=3, d=4.
+  let encoded = CharTokenizer.encode tok corpus
+  assertEqArrayInt "char encode 'abca\\nbcd'"
+    [ 0, 1, 2, 0, 3, 1, 2, 4 ] encoded
+  -- Decode round-trips the encoding back to the original.
+  let decoded = CharTokenizer.decode tok encoded
+  if decoded == corpus then log "  ✓ encode/decode round-trip"
+  else throw $ "  ✗ round-trip failed: got " <> show decoded
+  -- IDs out of range are silently dropped.
+  let trimmed = CharTokenizer.decode tok [ 0, 99, 1 ]
+  if trimmed == "ab" then log "  ✓ decode drops out-of-range IDs"
+  else throw $ "  ✗ expected \"ab\", got " <> show trimmed
+
+testLinearDecay :: Effect Unit
+testLinearDecay = do
+  log "Schedule.linearDecay:"
+  -- step=0 → 1.0; step=numSteps → 0.0; step=numSteps/2 → 0.5; clamped past end.
+  let schedule = Schedule.linearDecay 1000
+  assertCloseNum "linearDecay 1000 0" 1.0 (schedule 0)
+  assertCloseNum "linearDecay 1000 500" 0.5 (schedule 500)
+  assertCloseNum "linearDecay 1000 1000" 0.0 (schedule 1000)
+  assertCloseNum "linearDecay 1000 2000 (clamped)" 0.0 (schedule 2000)
+
+testCosineDecay :: Effect Unit
+testCosineDecay = do
+  log "Schedule.cosineDecay:"
+  -- step=0 → 1.0; step=numSteps → 0.0; step=numSteps/2 ≈ 0.5; clamped past end.
+  let schedule = Schedule.cosineDecay 1000
+  assertCloseNum "cosineDecay 1000 0" 1.0 (schedule 0)
+  assertCloseNum "cosineDecay 1000 500 (~ 0.5)" 0.5 (schedule 500)
+  assertCloseNum "cosineDecay 1000 1000" 0.0 (schedule 1000)
+  assertCloseNum "cosineDecay 1000 2000 (clamped)" 0.0 (schedule 2000)

@@ -6,6 +6,7 @@
 module Jax.Loaders.Fetch
   ( fetchBytes
   , fetchText
+  , fetchTextLines
   -- * Legacy callback API (kept for any caller that hasn't migrated)
   , fetchBytesCb
   , fetchTextCb
@@ -14,6 +15,8 @@ module Jax.Loaders.Fetch
 import Prelude
 
 import Control.Promise (Promise, toAffE)
+import Data.Array (filter)
+import Data.String (Pattern(..), split)
 import Effect (Effect)
 import Effect.Aff (Aff)
 import Effect.Uncurried (EffectFn1, EffectFn3, runEffectFn1, runEffectFn3)
@@ -31,6 +34,15 @@ fetchBytes url = toAffE (runEffectFn1 fetchBytesAffImpl url)
 -- | UTF-8 text variant of `fetchBytes`.
 fetchText :: String -> Aff String
 fetchText url = toAffE (runEffectFn1 fetchTextAffImpl url)
+
+-- | Fetch a UTF-8 text file and split on newlines, dropping empty
+-- | lines. Convenient for plain-text corpora (one item per line —
+-- | names lists, single-token-per-line vocabularies, simple datasets).
+-- | Splits on `\n`; if your file is `\r\n`-terminated, trim outside.
+fetchTextLines :: String -> Aff (Array String)
+fetchTextLines url = do
+  txt <- fetchText url
+  pure (filter (_ /= "") (split (Pattern "\n") txt))
 
 -- Legacy callback API ------------------------------------------------
 
