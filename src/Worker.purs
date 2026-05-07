@@ -17,7 +17,7 @@ import Effect.Exception (message, throw, try)
 import Effect.Ref (Ref)
 import Effect.Ref as Ref
 import Effect.Uncurried (EffectFn1, runEffectFn1)
-import Jax.Coerce (asArray1D, asArray1DInt)
+import Jax.Coerce (asArray1D, asArray1DInt, asNumber)
 import Jax.Core (D1, D2, NDArray, arrayInt1D, dimAt, dispose, linspace, ref, reshape, sliceAxis, toJs, topK)
 import Jax.Loaders.Config (parseLlamaConfig, probeRawExtras)
 import Jax.Loaders.Fetch (fetchBytes, fetchText)
@@ -40,7 +40,6 @@ import Jax.Autodiff (valueAndGradT)
 import Jax.Pytree (countParams, countTensors, perLayerL2sq, sumSquaredL2)
 import Data.Traversable (traverse)
 import Data.Number as Math
-import Unsafe.Coerce (unsafeCoerce)
 import Jax.Worker.Protocol
   ( SamplingParams
   , WorkerIn(..)
@@ -568,13 +567,11 @@ handleTrainSynthetic steps lr = do
     -- Initial diagnostics.
     initVag <- runEffectFn1 vagFn weights0
     initLossF <- toJs initVag.value
-    let initialLoss = unsafeCoerce initLossF :: Number
+    let initialLoss = asNumber initLossF
     dispose initVag.value
     initialL2sq <- sumSquaredL2 weights0
     initialPerLayerSq <- perLayerL2sq cfg.nLayers weights0
-    let
-      paramCount = countTensors weights0  -- # tensor leaves; not the param count
-      initialPerLayer = map Math.sqrt initialPerLayerSq
+    let initialPerLayer = map Math.sqrt initialPerLayerSq
     nParams <- countParams weights0
     -- Initial generation (greedy from [1]).
     initialGen <- generateGreedyCached cfg weights0 rope [ 1 ] 3
@@ -594,7 +591,7 @@ handleTrainSynthetic steps lr = do
     -- Final diagnostics.
     finalVag <- runEffectFn1 vagFn finalState.weights
     finalLossF <- toJs finalVag.value
-    let finalLoss = unsafeCoerce finalLossF :: Number
+    let finalLoss = asNumber finalLossF
     dispose finalVag.value
     finalL2sq <- sumSquaredL2 finalState.weights
     finalPerLayerSq <- perLayerL2sq cfg.nLayers finalState.weights
@@ -608,7 +605,6 @@ handleTrainSynthetic steps lr = do
       , initialGen
       , finalGen
       , totalMs: end - start
-      , paramCount  -- unused; silences a warning
       }
   case result of
     Left e -> post $ TrainError { err: message e }
@@ -638,7 +634,7 @@ trainLoop cfg rope vagFn opt nLeft stepIdx acc = do
   newWeights <- Optax.applyUpdatesT acc.weights updates
   vag <- runEffectFn1 vagFn newWeights
   lossF <- toJs vag.value
-  let stepLoss = unsafeCoerce lossF :: Number
+  let stepLoss = asNumber lossF
   dispose vag.value
   post $ TrainStep { step: stepIdx + 1, loss: stepLoss }
   trainLoop cfg rope vagFn opt (nLeft - 1) (stepIdx + 1)
