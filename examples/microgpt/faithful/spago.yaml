@@ -1,0 +1,23 @@
+package:
+  name: microgpt-faithful
+  dependencies:
+    - arrays
+    - console
+    - effect
+    - foldable-traversable
+    - integers
+    - lists
+    - maybe
+    - numbers
+    - ordered-collections
+    - prelude
+    - random
+    - refs
+    - strings
+    - transformers
+    - tuples
+  bundle:
+    module: Main
+    type: app
+  run:
+    main: Main

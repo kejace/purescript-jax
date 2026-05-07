@@ -160,6 +160,75 @@
             "unsafe-coerce"
           ]
         }
+      },
+      "microgpt-faithful": {
+        "path": "examples/microgpt/faithful",
+        "core": {
+          "dependencies": [
+            "arrays",
+            "console",
+            "effect",
+            "foldable-traversable",
+            "integers",
+            "lists",
+            "maybe",
+            "numbers",
+            "ordered-collections",
+            "prelude",
+            "random",
+            "refs",
+            "strings",
+            "transformers",
+            "tuples"
+          ],
+          "build_plan": [
+            "arrays",
+            "bifunctors",
+            "console",
+            "const",
+            "contravariant",
+            "control",
+            "distributive",
+            "effect",
+            "either",
+            "enums",
+            "exceptions",
+            "exists",
+            "foldable-traversable",
+            "functions",
+            "functors",
+            "gen",
+            "identity",
+            "integers",
+            "invariant",
+            "lazy",
+            "lists",
+            "maybe",
+            "newtype",
+            "nonempty",
+            "numbers",
+            "ordered-collections",
+            "orders",
+            "partial",
+            "prelude",
+            "profunctor",
+            "random",
+            "refs",
+            "safe-coerce",
+            "st",
+            "strings",
+            "tailrec",
+            "transformers",
+            "tuples",
+            "type-equality",
+            "unfoldable",
+            "unsafe-coerce"
+          ]
+        },
+        "test": {
+          "dependencies": [],
+          "build_plan": []
+        }
       }
     },
     "package_set": {
@@ -1597,6 +1666,16 @@
         "safe-coerce",
         "transformers",
         "tuples"
+      ]
+    },
+    "random": {
+      "type": "registry",
+      "version": "6.0.0",
+      "integrity": "sha256-7sZRo6P9UIiXDZ9s2QL9T8h3wlIwLdQrR4+oZKOijQw=",
+      "dependencies": [
+        "effect",
+        "integers",
+        "prelude"
       ]
     },
     "record": {
