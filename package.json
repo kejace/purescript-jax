@@ -6,8 +6,8 @@
   "scripts": {
     "build": "spago build",
     "bundle": "spago bundle --bundle-type app --module Main --outfile public/dist/index.js",
-    "bundle:browser": "spago bundle --module Browser --outfile public/dist/browser.js --platform browser --bundle-type app --bundler-args=--format=esm",
-    "bundle:worker": "spago bundle --module Worker --outfile public/dist/worker.js --platform browser --bundle-type app --bundler-args=--format=esm",
+    "bundle:browser": "spago bundle -p jax --module Browser --outfile public/dist/browser.js --platform browser --bundle-type app --bundler-args=--format=esm",
+    "bundle:worker": "spago bundle -p jax --module Worker --outfile public/dist/worker.js --platform browser --bundle-type app --bundler-args=--format=esm",
     "bundle:web": "bun run bundle:browser && bun run bundle:worker",
     "dev": "bun run bundle:web && vite",
     "preview": "vite preview"

@@ -9,10 +9,17 @@
       .row { margin: 0.6em 0; }
       label { display: inline-block; min-width: 8em; }
       input[type="text"], input[type="number"] { font: inherit; padding: 0.2em 0.4em; }
-      #output, #stats { font-family: ui-monospace, monospace; padding: 0.4em 0.6em; background: #f6f6f6; border-radius: 4px; min-height: 1.4em; word-break: break-all; }
-      #stats { margin-top: 0.6em; color: #555; }
+      textarea { font: inherit; padding: 0.2em 0.4em; }
+      #output, #stats, #microgptStats, #microgptSamples { font-family: ui-monospace, monospace; padding: 0.4em 0.6em; background: #f6f6f6; border-radius: 4px; min-height: 1.4em; word-break: break-all; }
+      #stats, #microgptStats { margin-top: 0.6em; color: #555; }
+      #microgptSamples { margin-top: 0.6em; white-space: pre-wrap; }
       .backend { font-weight: 600; color: #246; }
       button { font: inherit; padding: 0.3em 0.8em; cursor: pointer; }
+      .tabs { display: flex; gap: 0.4em; border-bottom: 1px solid #ddd; margin: 1em 0; }
+      .tab { padding: 0.5em 1em; cursor: pointer; background: none; border: none; border-bottom: 2px solid transparent; font: inherit; color: #555; }
+      .tab.active { color: #246; border-bottom-color: #246; font-weight: 600; }
+      .tab-panel { display: none; }
+      .tab-panel.active { display: block; }
     </style>
   </head>
   <body>
@@ -27,92 +34,186 @@
         " · SharedArrayBuffer=" + (typeof SharedArrayBuffer !== "undefined") +
         " · origin=" + window.location.origin;
     </script>
-    <div class="row">
-      <label for="modelPreset">preset</label>
-      <select id="modelPreset">
-        <option value="smol" selected>Smol-Llama-101M (default · ~400 MB)</option>
-        <option value="tinyllama">TinyLlama-1.1B-Chat-v1.0 (~4.4 GB after BF16→F32)</option>
-        <option value="custom">custom URLs (edit fields below)</option>
-      </select>
-    </div>
-    <div class="row">
-      <label for="weightsUrl">weights URL</label>
-      <input id="weightsUrl" type="text" size="60"
-        value="/local/smol-llama-101m/model.safetensors" />
-    </div>
-    <div class="row">
-      <label for="tokenizerUrl">tokenizer URL</label>
-      <input id="tokenizerUrl" type="text" size="60"
-        value="/local/smol-llama-101m/tokenizer.model" />
-    </div>
-    <div class="row">
-      <button id="loadWeights">load model + tokenizer</button>
-      <button id="clearCache" title="Wipes all OPFS-cached fetches">clear cache</button>
-      <span id="loadStatus" style="margin-left:0.6em;color:#555;font-family:ui-monospace,monospace;font-size:0.85em;"></span>
-    </div>
-    <hr style="margin:1em 0;border:0;border-top:1px solid #ddd;" />
-    <div class="row">
-      <label for="prompt" style="vertical-align:top">prompt</label>
-      <textarea id="prompt" rows="3" cols="60" style="font:inherit;vertical-align:top;">Once upon a time</textarea>
-    </div>
-    <div class="row">
-      <label for="maxNew">max new tokens</label>
-      <input id="maxNew" type="number" value="40" min="1" max="512" />
-    </div>
-    <div class="row" style="font-size:0.92em">
-      <label for="samplingMode">sampling</label>
-      <select id="samplingMode">
-        <option value="greedy" selected>greedy (argmax)</option>
-        <option value="temperature">temperature</option>
-        <option value="topK">top-k + temperature</option>
-        <option value="topP">top-p + temperature</option>
-      </select>
-      &nbsp;
-      <label for="temperature" style="min-width:auto">T</label>
-      <input id="temperature" type="text" value="0.8" size="4" />
-      &nbsp;
-      <label for="topK" style="min-width:auto">k</label>
-      <input id="topK" type="number" value="40" min="1" max="2000" />
-      &nbsp;
-      <label for="topP" style="min-width:auto">p</label>
-      <input id="topP" type="text" value="0.9" size="4" />
-    </div>
-    <div class="row">
-      <button id="generate">generate</button>
-      <button id="benchmark">benchmark all backends</button>
-    </div>
-    <div class="row" id="output"></div>
-    <div class="row" id="stats"></div>
-    <table id="benchTable" style="width:100%;border-collapse:collapse;display:none;">
-      <thead>
-        <tr style="text-align:left;border-bottom:1px solid #ccc;">
-          <th>backend</th><th>tokens</th><th>prefill (ms)</th>
-          <th>decode (ms)</th><th>total (ms)</th><th>tok/s</th>
-        </tr>
-      </thead>
-      <tbody id="benchBody"></tbody>
-    </table>
-    <p style="color:#888;font-size:0.85em">
-      Default checkpoint is Felladrin/Smol-Llama-101M-Chat-v1 (Llama-arch, ~101M params).
-      Click "load model + tokenizer" first; then enter a prompt and "generate".
-      The benchmark button still uses a tiny synthetic model to compare backends without a real-weight load.
-    </p>
-    <hr style="margin:1em 0;border:0;border-top:1px solid #ddd;" />
-    <h2 style="font-size:1.1em;margin:0.4em 0">Training demo (synthetic transformer)</h2>
-    <p style="color:#888;font-size:0.85em;margin:0.3em 0">
-      Trains a tiny in-process transformer (1 layer, 8 hidden, 8 vocab) with cross-entropy loss
-      and Adam to memorize the sequence [1,2,3] → [2,3,4]. Loss should drop from ~2.0 toward zero.
-      Initial / final L2 norm reported via <code>Jax.Pytree</code>'s heterogeneous traversal.
-    </p>
-    <div class="row">
-      <label for="trainSteps">steps</label>
-      <input id="trainSteps" type="number" value="60" min="1" max="500" />
-      &nbsp;
-      <label for="trainLR">learning rate</label>
-      <input id="trainLR" type="text" value="0.05" size="6" />
-      &nbsp;
-      <button id="trainSynthetic">train tiny transformer</button>
-    </div>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="inference">Inference</button>
+      <button class="tab" data-tab="microgpt">microGPT</button>
+    </nav>
+
+    <!-- Inference tab ===================================================== -->
+    <section class="tab-panel active" data-panel="inference">
+      <div class="row">
+        <label for="modelPreset">preset</label>
+        <select id="modelPreset">
+          <option value="smol" selected>Smol-Llama-101M (default · ~400 MB)</option>
+          <option value="tinyllama">TinyLlama-1.1B-Chat-v1.0 (~4.4 GB after BF16→F32)</option>
+          <option value="custom">custom URLs (edit fields below)</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="weightsUrl">weights URL</label>
+        <input id="weightsUrl" type="text" size="60"
+          value="/local/smol-llama-101m/model.safetensors" />
+      </div>
+      <div class="row">
+        <label for="tokenizerUrl">tokenizer URL</label>
+        <input id="tokenizerUrl" type="text" size="60"
+          value="/local/smol-llama-101m/tokenizer.model" />
+      </div>
+      <div class="row">
+        <button id="loadWeights">load model + tokenizer</button>
+        <button id="clearCache" title="Wipes all OPFS-cached fetches">clear cache</button>
+        <span id="loadStatus" style="margin-left:0.6em;color:#555;font-family:ui-monospace,monospace;font-size:0.85em;"></span>
+      </div>
+      <hr style="margin:1em 0;border:0;border-top:1px solid #ddd;" />
+      <div class="row">
+        <label for="prompt" style="vertical-align:top">prompt</label>
+        <textarea id="prompt" rows="3" cols="60" style="vertical-align:top;">Once upon a time</textarea>
+      </div>
+      <div class="row">
+        <label for="maxNew">max new tokens</label>
+        <input id="maxNew" type="number" value="40" min="1" max="512" />
+      </div>
+      <div class="row" style="font-size:0.92em">
+        <label for="samplingMode">sampling</label>
+        <select id="samplingMode">
+          <option value="greedy" selected>greedy (argmax)</option>
+          <option value="temperature">temperature</option>
+          <option value="topK">top-k + temperature</option>
+          <option value="topP">top-p + temperature</option>
+        </select>
+        &nbsp;
+        <label for="temperature" style="min-width:auto">T</label>
+        <input id="temperature" type="text" value="0.8" size="4" />
+        &nbsp;
+        <label for="topK" style="min-width:auto">k</label>
+        <input id="topK" type="number" value="40" min="1" max="2000" />
+        &nbsp;
+        <label for="topP" style="min-width:auto">p</label>
+        <input id="topP" type="text" value="0.9" size="4" />
+      </div>
+      <div class="row">
+        <button id="generate">generate</button>
+        <button id="benchmark">benchmark all backends</button>
+      </div>
+      <div class="row" id="output"></div>
+      <div class="row" id="stats"></div>
+      <table id="benchTable" style="width:100%;border-collapse:collapse;display:none;">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid #ccc;">
+            <th>backend</th><th>tokens</th><th>prefill (ms)</th>
+            <th>decode (ms)</th><th>total (ms)</th><th>tok/s</th>
+          </tr>
+        </thead>
+        <tbody id="benchBody"></tbody>
+      </table>
+      <p style="color:#888;font-size:0.85em">
+        Default checkpoint is Felladrin/Smol-Llama-101M-Chat-v1 (Llama-arch, ~101M params).
+        Click "load model + tokenizer" first; then enter a prompt and "generate".
+        The benchmark button still uses a tiny synthetic model to compare backends without a real-weight load.
+      </p>
+      <hr style="margin:1em 0;border:0;border-top:1px solid #ddd;" />
+      <h2 style="font-size:1.1em;margin:0.4em 0">Training demo (synthetic transformer)</h2>
+      <p style="color:#888;font-size:0.85em;margin:0.3em 0">
+        Trains a tiny in-process transformer (1 layer, 8 hidden, 8 vocab) with cross-entropy loss
+        and Adam to memorize the sequence [1,2,3] → [2,3,4]. Loss should drop from ~2.0 toward zero.
+        Initial / final L2 norm reported via <code>Jax.Pytree</code>'s heterogeneous traversal.
+      </p>
+      <div class="row">
+        <label for="trainSteps">steps</label>
+        <input id="trainSteps" type="number" value="60" min="1" max="500" />
+        &nbsp;
+        <label for="trainLR">learning rate</label>
+        <input id="trainLR" type="text" value="0.05" size="6" />
+        &nbsp;
+        <button id="trainSynthetic">train tiny transformer</button>
+      </div>
+    </section>
+
+    <!-- microGPT tab ====================================================== -->
+    <section class="tab-panel" data-panel="microgpt">
+      <p style="color:#555;font-size:0.92em;margin:0.3em 0">
+        Karpathy-style microGPT, in-browser. Trains a 1-layer transformer
+        on the corpus below (one token per character), then samples
+        continuations from a single-character prompt.
+        See <code>examples/microgpt/</code> for the matching CLI demo and
+        the side-by-side Faithful (from-scratch autograd) port.
+      </p>
+      <div class="row">
+        <label for="microgptCorpus" style="vertical-align:top">corpus</label>
+        <textarea id="microgptCorpus" rows="6" cols="60" style="vertical-align:top;">ada
+emma
+olivia
+ava
+isabella
+sophia
+charlotte
+mia
+amelia
+harper
+evelyn
+abigail
+emily
+elizabeth
+mila
+ella
+avery
+sofia
+camila
+aria
+scarlett
+victoria
+madison
+luna
+grace
+chloe
+penelope
+layla
+riley
+zoey
+</textarea>
+      </div>
+      <div class="row">
+        <label for="microgptSteps">steps</label>
+        <input id="microgptSteps" type="number" value="100" min="1" max="2000" />
+        &nbsp;
+        <label for="microgptLR" style="min-width:auto">lr</label>
+        <input id="microgptLR" type="text" value="0.005" size="6" />
+        &nbsp;
+        <label for="microgptTemp" style="min-width:auto">T</label>
+        <input id="microgptTemp" type="text" value="0.8" size="4" />
+        &nbsp;
+        <label for="microgptNumSamples" style="min-width:auto">samples</label>
+        <input id="microgptNumSamples" type="number" value="5" min="1" max="20" />
+        &nbsp;
+        <label for="microgptMaxLen" style="min-width:auto">len</label>
+        <input id="microgptMaxLen" type="number" value="16" min="1" max="64" />
+      </div>
+      <div class="row">
+        <button id="microgptTrain">train + sample</button>
+        <span id="microgptStatus" style="margin-left:0.6em;color:#555;font-family:ui-monospace,monospace;font-size:0.85em;"></span>
+      </div>
+      <div class="row" id="microgptStats"></div>
+      <div class="row" id="microgptSamples"></div>
+      <p style="color:#888;font-size:0.85em">
+        With these defaults (100 steps, lr=5e-3, T=0.8) the model memorizes the first
+        ~32 chars of the corpus; samples often play back leading names like "ada", "emma".
+        Bump steps to 500+ and add corpus variety for genuine generation.
+      </p>
+    </section>
+
     <script type="module" src="/dist/browser.js"></script>
+    <script>
+      // Tab switching. Plain DOM — kept out of PureScript for brevity since
+      // the panels are static and only their visibility toggles.
+      document.querySelectorAll('.tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const which = btn.dataset.tab;
+          document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === btn));
+          document.querySelectorAll('.tab-panel').forEach(p =>
+            p.classList.toggle('active', p.dataset.panel === which));
+        });
+      });
+    </script>
   </body>
 </html>

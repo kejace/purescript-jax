@@ -75,10 +75,20 @@ data WorkerIn
       { steps :: Int
       , learningRate :: Number
       }
+  | MicrogptTrain
+      { corpus :: String
+      , numSteps :: Int
+      , lr :: Number
+      , temperature :: Number
+      , numSamples :: Int
+      , maxSampleLen :: Int
+      , seed :: Int
+      }
 
 derive instance Eq WorkerIn
 
 data WorkerInTag = TagLoadModel | TagGenerate | TagBenchmark | TagTrainSynthetic
+                 | TagMicrogptTrain
 
 printIn :: WorkerInTag -> String
 printIn = case _ of
@@ -86,6 +96,7 @@ printIn = case _ of
   TagGenerate -> "generate"
   TagBenchmark -> "benchmark"
   TagTrainSynthetic -> "trainSynthetic"
+  TagMicrogptTrain -> "microgptTrain"
 
 parseIn :: String -> Maybe WorkerInTag
 parseIn = case _ of
@@ -93,6 +104,7 @@ parseIn = case _ of
   "generate" -> Just TagGenerate
   "benchmark" -> Just TagBenchmark
   "trainSynthetic" -> Just TagTrainSynthetic
+  "microgptTrain" -> Just TagMicrogptTrain
   _ -> Nothing
 
 loadModelPayload :: JsonCodec { url :: String, tokenizerUrl :: String }
@@ -134,6 +146,16 @@ trainSyntheticPayload = CAR.object "TrainSynthetic"
   , learningRate: CA.number
   }
 
+microgptTrainPayload
+  :: JsonCodec
+       { corpus :: String, numSteps :: Int, lr :: Number, temperature :: Number
+       , numSamples :: Int, maxSampleLen :: Int, seed :: Int }
+microgptTrainPayload = CAR.object "MicrogptTrain"
+  { corpus: CA.string, numSteps: CA.int, lr: CA.number
+  , temperature: CA.number, numSamples: CA.int, maxSampleLen: CA.int
+  , seed: CA.int
+  }
+
 workerInCodec :: JsonCodec WorkerIn
 workerInCodec = CAS.taggedSum "WorkerIn" printIn parseIn fromIn toIn
   where
@@ -142,12 +164,14 @@ workerInCodec = CAS.taggedSum "WorkerIn" printIn parseIn fromIn toIn
     TagGenerate -> Right (map Generate <<< CA.decode generatePayload)
     TagBenchmark -> Right (map Benchmark <<< CA.decode benchmarkPayload)
     TagTrainSynthetic -> Right (map TrainSynthetic <<< CA.decode trainSyntheticPayload)
+    TagMicrogptTrain -> Right (map MicrogptTrain <<< CA.decode microgptTrainPayload)
 
   toIn = case _ of
     LoadModel r -> Tuple TagLoadModel (Just (CA.encode loadModelPayload r))
     Generate r -> Tuple TagGenerate (Just (CA.encode generatePayload r))
     Benchmark r -> Tuple TagBenchmark (Just (CA.encode benchmarkPayload r))
     TrainSynthetic r -> Tuple TagTrainSynthetic (Just (CA.encode trainSyntheticPayload r))
+    MicrogptTrain r -> Tuple TagMicrogptTrain (Just (CA.encode microgptTrainPayload r))
 
 -- =============================================================================
 -- Outbound — worker to browser
@@ -204,6 +228,11 @@ data WorkerOut
       , totalMs :: Number
       }
   | TrainError { err :: String }
+  | MicrogptStart { paramCount :: Int, vocabSize :: Int, numSteps :: Int }
+  | MicrogptStep { step :: Int, loss :: Number }
+  | MicrogptSample { index :: Int, text :: String }
+  | MicrogptDone { finalLoss :: Number, totalMs :: Number }
+  | MicrogptError { err :: String }
 
 derive instance Eq WorkerOut
 
@@ -212,6 +241,8 @@ data WorkerOutTag
   | TagLoadDone | TagLoadError | TagGenerateStart | TagGenerateError | TagTokenText
   | TagDone | TagBenchResult | TagBenchmarkDone
   | TagTrainStart | TagTrainStep | TagTrainDone | TagTrainError
+  | TagMicrogptStart | TagMicrogptStep | TagMicrogptSample | TagMicrogptDone
+  | TagMicrogptError
 
 printOut :: WorkerOutTag -> String
 printOut = case _ of
@@ -232,6 +263,11 @@ printOut = case _ of
   TagTrainStep -> "trainStep"
   TagTrainDone -> "trainDone"
   TagTrainError -> "trainError"
+  TagMicrogptStart -> "microgptStart"
+  TagMicrogptStep -> "microgptStep"
+  TagMicrogptSample -> "microgptSample"
+  TagMicrogptDone -> "microgptDone"
+  TagMicrogptError -> "microgptError"
 
 parseOut :: String -> Maybe WorkerOutTag
 parseOut = case _ of
@@ -252,6 +288,11 @@ parseOut = case _ of
   "trainStep" -> Just TagTrainStep
   "trainDone" -> Just TagTrainDone
   "trainError" -> Just TagTrainError
+  "microgptStart" -> Just TagMicrogptStart
+  "microgptStep" -> Just TagMicrogptStep
+  "microgptSample" -> Just TagMicrogptSample
+  "microgptDone" -> Just TagMicrogptDone
+  "microgptError" -> Just TagMicrogptError
   _ -> Nothing
 
 readyP :: JsonCodec { backend :: String }
@@ -327,6 +368,23 @@ trainDoneP = CAR.object "TrainDone"
 trainErrorP :: JsonCodec { err :: String }
 trainErrorP = CAR.object "TrainError" { err: CA.string }
 
+microgptStartP :: JsonCodec { paramCount :: Int, vocabSize :: Int, numSteps :: Int }
+microgptStartP = CAR.object "MicrogptStart"
+  { paramCount: CA.int, vocabSize: CA.int, numSteps: CA.int }
+
+microgptStepP :: JsonCodec { step :: Int, loss :: Number }
+microgptStepP = CAR.object "MicrogptStep" { step: CA.int, loss: CA.number }
+
+microgptSampleP :: JsonCodec { index :: Int, text :: String }
+microgptSampleP = CAR.object "MicrogptSample" { index: CA.int, text: CA.string }
+
+microgptDoneP :: JsonCodec { finalLoss :: Number, totalMs :: Number }
+microgptDoneP = CAR.object "MicrogptDone"
+  { finalLoss: CA.number, totalMs: CA.number }
+
+microgptErrorP :: JsonCodec { err :: String }
+microgptErrorP = CAR.object "MicrogptError" { err: CA.string }
+
 workerOutCodec :: JsonCodec WorkerOut
 workerOutCodec = CAS.taggedSum "WorkerOut" printOut parseOut fromOut toOut
   where
@@ -348,6 +406,11 @@ workerOutCodec = CAS.taggedSum "WorkerOut" printOut parseOut fromOut toOut
     TagTrainStep -> Right (map TrainStep <<< CA.decode trainStepP)
     TagTrainDone -> Right (map TrainDone <<< CA.decode trainDoneP)
     TagTrainError -> Right (map TrainError <<< CA.decode trainErrorP)
+    TagMicrogptStart -> Right (map MicrogptStart <<< CA.decode microgptStartP)
+    TagMicrogptStep -> Right (map MicrogptStep <<< CA.decode microgptStepP)
+    TagMicrogptSample -> Right (map MicrogptSample <<< CA.decode microgptSampleP)
+    TagMicrogptDone -> Right (map MicrogptDone <<< CA.decode microgptDoneP)
+    TagMicrogptError -> Right (map MicrogptError <<< CA.decode microgptErrorP)
 
   toOut = case _ of
     Ready r -> Tuple TagReady (Just (CA.encode readyP r))
@@ -367,6 +430,11 @@ workerOutCodec = CAS.taggedSum "WorkerOut" printOut parseOut fromOut toOut
     TrainStep r -> Tuple TagTrainStep (Just (CA.encode trainStepP r))
     TrainDone r -> Tuple TagTrainDone (Just (CA.encode trainDoneP r))
     TrainError r -> Tuple TagTrainError (Just (CA.encode trainErrorP r))
+    MicrogptStart r -> Tuple TagMicrogptStart (Just (CA.encode microgptStartP r))
+    MicrogptStep r -> Tuple TagMicrogptStep (Just (CA.encode microgptStepP r))
+    MicrogptSample r -> Tuple TagMicrogptSample (Just (CA.encode microgptSampleP r))
+    MicrogptDone r -> Tuple TagMicrogptDone (Just (CA.encode microgptDoneP r))
+    MicrogptError r -> Tuple TagMicrogptError (Just (CA.encode microgptErrorP r))
 
 -- =============================================================================
 -- String helpers

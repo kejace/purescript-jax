@@ -38,6 +38,7 @@ import Jax.Random as Random
 import Jax.Optax as Optax
 import Jax.Autodiff (valueAndGradT)
 import Jax.Pytree (countParams, countTensors, perLayerL2sq, sumSquaredL2)
+import Jax.Demo.Microgpt as Microgpt
 import Data.Traversable (traverse)
 import Data.Number as Math
 import Jax.Worker.Protocol
@@ -129,6 +130,7 @@ main = do
       Generate r -> handleGenerate modelRef r.prompt r.maxNew r.debug r.sampling
       Benchmark r -> handleBenchmark r.benchPrompt r.maxNew
       TrainSynthetic r -> handleTrainSynthetic r.steps r.learningRate
+      MicrogptTrain r -> handleMicrogptTrain r
 
 -- Model loading -------------------------------------------------------------
 
@@ -639,3 +641,39 @@ trainLoop cfg rope vagFn opt nLeft stepIdx acc = do
   post $ TrainStep { step: stepIdx + 1, loss: stepLoss }
   trainLoop cfg rope vagFn opt (nLeft - 1) (stepIdx + 1)
     { weights: newWeights, state: newState, grad: vag.grad }
+
+-- | In-browser microGPT training. Same pipeline as the CLI demo —
+-- | same `Jax.Demo.Microgpt.runMicrogpt` — but the callbacks post
+-- | typed protocol messages instead of writing to console. The UI
+-- | wires those into a live loss feed + per-sample text.
+handleMicrogptTrain
+  :: { corpus :: String, numSteps :: Int, lr :: Number
+     , temperature :: Number, numSamples :: Int, maxSampleLen :: Int
+     , seed :: Int }
+  -> Effect Unit
+handleMicrogptTrain r = do
+  start <- performanceNow
+  result <- try do
+    let
+      defs = Microgpt.defaultParams
+      params = defs
+        { corpus = r.corpus
+        , numSteps = r.numSteps
+        , lr = r.lr
+        , temperature = r.temperature
+        , numSamples = r.numSamples
+        , maxSampleLen = r.maxSampleLen
+        , seed = r.seed
+        }
+    Microgpt.runMicrogpt params
+      { onStart: \s -> post $ MicrogptStart
+          { paramCount: s.paramCount, vocabSize: s.vocabSize, numSteps: r.numSteps }
+      , onProgress: \i loss -> post $ MicrogptStep { step: i, loss }
+      , onSampled: \i text -> post $ MicrogptSample { index: i, text }
+      , onDone: \finalLoss -> do
+          end <- performanceNow
+          post $ MicrogptDone { finalLoss, totalMs: end - start }
+      }
+  case result of
+    Left e -> post $ MicrogptError { err: message e }
+    Right _ -> pure unit

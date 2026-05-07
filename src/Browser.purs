@@ -112,6 +112,17 @@ main = do
   temperatureEl <- getElById "temperature"
   topKEl <- getElById "topK"
   topPEl <- getElById "topP"
+  -- microGPT tab elements
+  microgptCorpusEl <- getElById "microgptCorpus"
+  microgptStepsEl <- getElById "microgptSteps"
+  microgptLREl <- getElById "microgptLR"
+  microgptTempEl <- getElById "microgptTemp"
+  microgptNumSamplesEl <- getElById "microgptNumSamples"
+  microgptMaxLenEl <- getElById "microgptMaxLen"
+  microgptTrainBtn <- getElById "microgptTrain"
+  microgptStatusEl <- getElById "microgptStatus"
+  microgptStatsEl <- getElById "microgptStats"
+  microgptSamplesEl <- getElById "microgptSamples"
   setText backendEl "spawning worker…"
   -- Wire incoming messages from the worker.
   onMessageRaw worker \raw -> case decodeStr workerOutCodec raw of
@@ -157,6 +168,22 @@ main = do
             <> " · " <> toFixed1 r.totalMs <> " ms"
         )
       TrainError r -> setText statsEl ("train error: " <> r.err)
+      MicrogptStart r -> do
+        setText microgptStatusEl ""
+        setText microgptStatsEl
+          ( "training " <> show r.paramCount <> " params · vocab "
+              <> show r.vocabSize <> " · " <> show r.numSteps <> " steps planned"
+          )
+        setText microgptSamplesEl ""
+      MicrogptStep r -> setText microgptStatsEl
+        ( "step " <> show r.step <> " · loss " <> toFixed4 r.loss )
+      MicrogptSample r -> appendText microgptSamplesEl
+        ("→ " <> r.text <> "\n")
+      MicrogptDone r -> setText microgptStatusEl
+        ( "done · final loss " <> toFixed4 r.finalLoss
+            <> " · " <> toFixed1 r.totalMs <> " ms"
+        )
+      MicrogptError r -> setText microgptStatusEl ("error: " <> r.err)
       LoadStart r -> setText loadStatusEl ("fetching " <> r.url <> "…")
       LoadConfigMsg _ -> pure unit
       LoadTokenizer r -> setText loadStatusEl
@@ -232,6 +259,31 @@ main = do
       learningRate = fromMaybe 0.05 (Number.fromString lrStr)
     setText statsEl ("training " <> show steps <> " steps @ lr=" <> lrStr <> "…")
     postIn worker $ TrainSynthetic { steps, learningRate }
+  -- Wire the microGPT Train button. Independent of the inference model;
+  -- runs the full Karpathy-style pipeline (tokenize → init → train →
+  -- sample) inside the worker. Posts MicrogptStart / Step / Sample /
+  -- Done / Error.
+  onClick microgptTrainBtn do
+    setText microgptStatusEl "training…"
+    setText microgptStatsEl ""
+    setText microgptSamplesEl ""
+    corpus <- getValue microgptCorpusEl
+    stepsStr <- getValue microgptStepsEl
+    lrStr <- getValue microgptLREl
+    tempStr <- getValue microgptTempEl
+    numSamplesStr <- getValue microgptNumSamplesEl
+    maxLenStr <- getValue microgptMaxLenEl
+    let
+      params =
+        { corpus
+        , numSteps: fromMaybe 100 (fromString stepsStr)
+        , lr: fromMaybe 0.005 (Number.fromString lrStr)
+        , temperature: fromMaybe 0.8 (Number.fromString tempStr)
+        , numSamples: fromMaybe 5 (fromString numSamplesStr)
+        , maxSampleLen: fromMaybe 16 (fromString maxLenStr)
+        , seed: 1337
+        }
+    postIn worker $ MicrogptTrain params
   -- Wire the Benchmark button. Always uses the synthetic model.
   onClick benchmarkBtn do
     setText outputEl ""
