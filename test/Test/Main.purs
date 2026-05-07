@@ -19,14 +19,13 @@ import Jax.Core
   , D2
   , D3
   , NDArray
-  , add
   , arange
   , array1D
   , arrayInt1D
+  , dispose
   , init
-  , matmul
+  , linspace
   , mean
-  , mul
   , ones
   , ref
   , reshape
@@ -35,11 +34,7 @@ import Jax.Core
   , sliceAxis
   , square
   , sum
-  , dispose
-  , linspace
-  , mulScalar
   , toJs
-  , transpose
   , zeros
   )
 import Jax.Managed (Managed, allocate, runManaged)
@@ -312,206 +307,136 @@ testRMSNorm :: Effect Unit
 testRMSNorm = do
   log "RMSNorm:"
   -- Shape parity (1D)
-  runManaged
-    ( do
-        x <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0 ])
-        w <- allocate (ones [ 4 ] :: Effect (NDArray D1))
-        allocate (rmsnorm 1.0e-6 x w :: Effect (NDArray D1))
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "rmsnorm 1D shape preserved" [ 4 ] s
+  runManaged_ do
+    x <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0 ])
+    w <- allocate (ones [ 4 ] :: Effect (NDArray D1))
+    out <- allocate (rmsnorm 1.0e-6 x w :: Effect (NDArray D1))
+    lift $ checkShape "rmsnorm 1D shape preserved" [ 4 ] (lit out)
   -- Numerical: input [2,2,2,2], weight = ones, eps = 0
-  --   x² = [4,4,4,4]; mean = 4; rsqrt(4) = 0.5
-  --   output = x * 0.5 * 1 = [1,1,1,1]
-  runManaged
-    ( do
-        x <- allocate (array1D [ 2.0, 2.0, 2.0, 2.0 ])
-        w <- allocate (ones [ 4 ] :: Effect (NDArray D1))
-        allocate (rmsnorm 0.0 x w :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "rmsnorm [2,2,2,2] = [1,1,1,1]" [ 1.0, 1.0, 1.0, 1.0 ] (asArray1D f)
+  --   x² = [4,4,4,4]; mean = 4; rsqrt(4) = 0.5; out = x * 0.5 = [1,1,1,1]
+  runManaged_ do
+    x <- allocate (array1D [ 2.0, 2.0, 2.0, 2.0 ])
+    w <- allocate (ones [ 4 ] :: Effect (NDArray D1))
+    out <- allocate (rmsnorm 0.0 x w :: Effect (NDArray D1))
+    lift $ checkT "rmsnorm [2,2,2,2] = [1,1,1,1]" [ 1.0, 1.0, 1.0, 1.0 ] (lit out)
   -- Shape parity (2D): ones[2,3] with weight ones[3] -> output ones[2,3]
-  runManaged
-    ( do
-        x <- allocate (ones [ 2, 3 ] :: Effect (NDArray D2))
-        w <- allocate (ones [ 3 ] :: Effect (NDArray D1))
-        allocate (rmsnorm 1.0e-6 x w :: Effect (NDArray D2))
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "rmsnorm 2D shape preserved" [ 2, 3 ] s
+  runManaged_ do
+    x <- allocate (ones [ 2, 3 ] :: Effect (NDArray D2))
+    w <- allocate (ones [ 3 ] :: Effect (NDArray D1))
+    out <- allocate (rmsnorm 1.0e-6 x w :: Effect (NDArray D2))
+    lift $ checkShape "rmsnorm 2D shape preserved" [ 2, 3 ] (lit out)
 
 testEmbedUnembed :: Effect Unit
 testEmbedUnembed = do
   log "Embed / LMHead:"
   -- Embed: table [[1,2],[3,4],[5,6]], ids [0,2,1] -> [[1,2],[5,6],[3,4]]
-  runManaged
-    ( do
-        flat <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 ])
-        flatR <- lift (ref flat)
-        table <- allocate (reshape flatR [ 3, 2 ] :: Effect (NDArray D2))
-        ids <- allocate (arrayInt1D [ 0, 2, 1 ])
-        out <- allocate (embed table ids)
-        outR <- lift (ref out)
-        allocate (reshape outR [ 6 ] :: Effect (NDArray D1))
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "embed flattened shape" [ 6 ] s
-      f <- toJs r
-      assertCloseArray "embed table[0,2,1] = [1,2,5,6,3,4]"
-        [ 1.0, 2.0, 5.0, 6.0, 3.0, 4.0 ]
-        (asArray1D f)
+  runManaged_ do
+    flat <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 ])
+    table <- allocate (run (reshapeT (lit flat) [ 3, 2 ]) :: Effect (NDArray D2))
+    ids <- allocate (arrayInt1D [ 0, 2, 1 ])
+    out <- allocate (embed table ids)
+    lift do
+      checkShape "embed output shape" [ 3, 2 ] (lit out)
+      checkT "embed table[0,2,1] = [1,2,5,6,3,4]"
+        [ 1.0, 2.0, 5.0, 6.0, 3.0, 4.0 ] (lit out)
   -- Unembed: hidden [[1,2,3],[4,5,6]] @ table^T where
   --   table = [[1,2,3],[4,5,6],[7,8,9],[10,11,12]] (vocab=4, embed=3).
-  -- Expected: [[14,32,50,68],[32,77,122,167]] -> flat [14,32,50,68,32,77,122,167].
-  runManaged
-    ( do
-        hFlat <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 ])
-        hFlatR <- lift (ref hFlat)
-        hidden <- allocate (reshape hFlatR [ 2, 3 ] :: Effect (NDArray D2))
-        tFlat <- allocate
-          ( array1D
-              [ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 ]
-          )
-        tFlatR <- lift (ref tFlat)
-        table <- allocate (reshape tFlatR [ 4, 3 ] :: Effect (NDArray D2))
-        out <- allocate (unembed hidden table)
-        outR <- lift (ref out)
-        allocate (reshape outR [ 8 ] :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "unembed [2,3] @ table^T = [2,4]"
-        [ 14.0, 32.0, 50.0, 68.0, 32.0, 77.0, 122.0, 167.0 ]
-        (asArray1D f)
+  -- Expected: [[14,32,50,68],[32,77,122,167]].
+  runManaged_ do
+    hFlat <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 ])
+    hidden <- allocate (run (reshapeT (lit hFlat) [ 2, 3 ]) :: Effect (NDArray D2))
+    tFlat <- allocate
+      (array1D [ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 ])
+    table <- allocate (run (reshapeT (lit tFlat) [ 4, 3 ]) :: Effect (NDArray D2))
+    out <- allocate (unembed hidden table)
+    lift $ checkT "unembed [2,3] @ table^T = [2,4]"
+      [ 14.0, 32.0, 50.0, 68.0, 32.0, 77.0, 122.0, 167.0 ] (lit out)
+
+-- | Slice along an arbitrary axis while leaving the source borrowed.
+-- | `sliceAxis` consumes its first argument, so ref-bump up front.
+sliceAxisBorrow :: forall d. NDArray d -> Int -> Int -> Int -> Effect (NDArray d)
+sliceAxisBorrow x axis start end = do
+  xR <- ref x
+  sliceAxis xR axis start end
 
 testRoPE :: Effect Unit
 testRoPE = do
   log "RoPE:"
   -- Shape parity for the precomputed tables
-  runManaged
-    ( do
-        tab <- lift (precomputeRoPE 4 8 10000.0)
-        cosT <- allocate (pure tab.cos)
-        sinT <- allocate (pure tab.sin)
-        cosShape <- lift (shape cosT)
-        sinShape <- lift (shape sinT)
-        pure { cosShape, sinShape }
-    )
-    \{ cosShape, sinShape } -> do
-      assertEqArrayInt "RoPE cos table shape" [ 8, 2 ] cosShape
-      assertEqArrayInt "RoPE sin table shape" [ 8, 2 ] sinShape
+  runManaged_ do
+    tab <- lift (precomputeRoPE 4 8 10000.0)
+    cosT <- allocate (pure tab.cos)
+    sinT <- allocate (pure tab.sin)
+    lift do
+      checkShape "RoPE cos table shape" [ 8, 2 ] (lit cosT)
+      checkShape "RoPE sin table shape" [ 8, 2 ] (lit sinT)
   -- Identity at position 0: cos=1, sin=0, output == input.
-  runManaged
-    ( do
-        tab <- lift (precomputeRoPE 4 8 10000.0)
-        cosT <- allocate (pure tab.cos)
-        sinT <- allocate (pure tab.sin)
-        cosR <- lift (ref cosT)
-        cosRow <- allocate (sliceAxis cosR 0 0 1)
-        sinR <- lift (ref sinT)
-        sinRow <- allocate (sliceAxis sinR 0 0 1)
-        xFlat <- allocate (array1D [ 3.0, 1.0, 4.0, 1.0 ])
-        xR <- lift (ref xFlat)
-        x <- allocate (reshape xR [ 1, 4 ] :: Effect (NDArray D2))
-        out <- allocate (applyRoPE 2 x cosRow sinRow)
-        outR <- lift (ref out)
-        allocate (reshape outR [ 4 ] :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "applyRoPE @pos=0 is identity"
-        [ 3.0, 1.0, 4.0, 1.0 ]
-        (asArray1D f)
+  runManaged_ do
+    tab <- lift (precomputeRoPE 4 8 10000.0)
+    cosT <- allocate (pure tab.cos)
+    sinT <- allocate (pure tab.sin)
+    cosRow <- allocate (sliceAxisBorrow cosT 0 0 1 :: Effect (NDArray D2))
+    sinRow <- allocate (sliceAxisBorrow sinT 0 0 1 :: Effect (NDArray D2))
+    xFlat <- allocate (array1D [ 3.0, 1.0, 4.0, 1.0 ])
+    x <- allocate (run (reshapeT (lit xFlat) [ 1, 4 ]) :: Effect (NDArray D2))
+    out <- allocate (applyRoPE 2 x cosRow sinRow)
+    lift $ checkT "applyRoPE @pos=0 is identity"
+      [ 3.0, 1.0, 4.0, 1.0 ] (lit out)
   -- Position-1 rotation of x = [1, 0, 0, 0] (4-dim, halfDim=2):
   --   cos[1] = [cos(1), cos(0.01)],  sin[1] = [sin(1), sin(0.01)]
   --   xFirst=[1,0], xSecond=[0,0]
-  --   yFirst  = [cos(1), 0]
-  --   ySecond = [sin(1), 0]
   --   out = [cos(1), 0, sin(1), 0] ≈ [0.5403, 0, 0.8415, 0]
-  runManaged
-    ( do
-        tab <- lift (precomputeRoPE 4 8 10000.0)
-        cosT <- allocate (pure tab.cos)
-        sinT <- allocate (pure tab.sin)
-        cosR <- lift (ref cosT)
-        cosRow <- allocate (sliceAxis cosR 0 1 2)
-        sinR <- lift (ref sinT)
-        sinRow <- allocate (sliceAxis sinR 0 1 2)
-        xFlat <- allocate (array1D [ 1.0, 0.0, 0.0, 0.0 ])
-        xR <- lift (ref xFlat)
-        x <- allocate (reshape xR [ 1, 4 ] :: Effect (NDArray D2))
-        out <- allocate (applyRoPE 2 x cosRow sinRow)
-        outR <- lift (ref out)
-        allocate (reshape outR [ 4 ] :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "applyRoPE @pos=1 of [1,0,0,0]"
-        [ 0.5403023058681398, 0.0, 0.8414709848078965, 0.0 ]
-        (asArray1D f)
+  runManaged_ do
+    tab <- lift (precomputeRoPE 4 8 10000.0)
+    cosT <- allocate (pure tab.cos)
+    sinT <- allocate (pure tab.sin)
+    cosRow <- allocate (sliceAxisBorrow cosT 0 1 2 :: Effect (NDArray D2))
+    sinRow <- allocate (sliceAxisBorrow sinT 0 1 2 :: Effect (NDArray D2))
+    xFlat <- allocate (array1D [ 1.0, 0.0, 0.0, 0.0 ])
+    x <- allocate (run (reshapeT (lit xFlat) [ 1, 4 ]) :: Effect (NDArray D2))
+    out <- allocate (applyRoPE 2 x cosRow sinRow)
+    lift $ checkT "applyRoPE @pos=1 of [1,0,0,0]"
+      [ 0.5403023058681398, 0.0, 0.8414709848078965, 0.0 ] (lit out)
 
 testAttention :: Effect Unit
 testAttention = do
   log "Attention:"
   -- Shape parity for unbatched [seq, n_heads, head_dim].
-  runManaged
-    ( do
-        q <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
-        k <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
-        v <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
-        allocate (attention q k v)
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "attention output shape [3,2,4]" [ 3, 2, 4 ] s
+  runManaged_ do
+    q <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
+    k <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
+    v <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
+    out <- allocate (attention q k v)
+    lift $ checkShape "attention output shape [3,2,4]" [ 3, 2, 4 ] (lit out)
   -- GQA shape: 4 query heads, 2 KV heads. jax-js broadcasts internally.
-  runManaged
-    ( do
-        q <- allocate (ones [ 3, 4, 4 ] :: Effect (NDArray D3))
-        k <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
-        v <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
-        allocate (attention q k v)
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "GQA output shape [3,4,4] (4 q-heads, 2 kv-heads)" [ 3, 4, 4 ] s
+  runManaged_ do
+    q <- allocate (ones [ 3, 4, 4 ] :: Effect (NDArray D3))
+    k <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
+    v <- allocate (ones [ 3, 2, 4 ] :: Effect (NDArray D3))
+    out <- allocate (attention q k v)
+    lift $ checkShape "GQA output shape [3,4,4] (4 q-heads, 2 kv-heads)"
+      [ 3, 4, 4 ] (lit out)
 
 testMLP :: Effect Unit
 testMLP = do
   log "MLP (SwiGLU):"
   -- Shape parity: x [seq=3, hidden=4], inter=8, out [3, 4]
-  runManaged
-    ( do
-        x <- allocate (ones [ 3, 4 ] :: Effect (NDArray D2))
-        gp <- allocate (ones [ 4, 8 ] :: Effect (NDArray D2))
-        up <- allocate (ones [ 4, 8 ] :: Effect (NDArray D2))
-        dp <- allocate (ones [ 8, 4 ] :: Effect (NDArray D2))
-        allocate (mlp x gp up dp)
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "mlp output shape [3,4]" [ 3, 4 ] s
+  runManaged_ do
+    x <- allocate (ones [ 3, 4 ] :: Effect (NDArray D2))
+    gp <- allocate (ones [ 4, 8 ] :: Effect (NDArray D2))
+    up <- allocate (ones [ 4, 8 ] :: Effect (NDArray D2))
+    dp <- allocate (ones [ 8, 4 ] :: Effect (NDArray D2))
+    out <- allocate (mlp x gp up dp)
+    lift $ checkShape "mlp output shape [3,4]" [ 3, 4 ] (lit out)
   -- Numerical sanity (zeros input → zeros output regardless of weights).
-  runManaged
-    ( do
-        x <- allocate (zeros [ 2, 3 ] :: Effect (NDArray D2))
-        gp <- allocate (ones [ 3, 5 ] :: Effect (NDArray D2))
-        up <- allocate (ones [ 3, 5 ] :: Effect (NDArray D2))
-        dp <- allocate (ones [ 5, 3 ] :: Effect (NDArray D2))
-        out <- allocate (mlp x gp up dp)
-        outR <- lift (ref out)
-        allocate (reshape outR [ 6 ] :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "mlp(zeros) = zeros"
-        [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ]
-        (asArray1D f)
+  runManaged_ do
+    x <- allocate (zeros [ 2, 3 ] :: Effect (NDArray D2))
+    gp <- allocate (ones [ 3, 5 ] :: Effect (NDArray D2))
+    up <- allocate (ones [ 3, 5 ] :: Effect (NDArray D2))
+    dp <- allocate (ones [ 5, 3 ] :: Effect (NDArray D2))
+    out <- allocate (mlp x gp up dp)
+    lift $ checkT "mlp(zeros) = zeros"
+      [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ] (lit out)
 
 testBlock :: Effect Unit
 testBlock = do
@@ -529,58 +454,53 @@ testBlock = do
       , ropeTheta: 10000.0
       , normEps: 1.0e-6
       }
-  runManaged
-    ( do
-        emb <- allocate (ones [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2))
-        -- Layer 0
-        an0 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        wq0 <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wk0 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wv0 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wo0 <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-        mn0 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        gp0 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        up0 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        dp0 <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
-        -- Layer 1
-        an1 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        wq1 <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wk1 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wv1 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wo1 <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-        mn1 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        gp1 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        up1 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        dp1 <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
-        fn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        -- RoPE tables
-        rope <- lift (precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta)
-        cosT <- allocate (pure rope.cos)
-        sinT <- allocate (pure rope.sin)
-        ids <- allocate (arrayInt1D [ 0, 1, 2 ])
-        let
-          weights =
-            { embedding: emb
-            , layers:
-                [ { attnNorm: an0
-                  , attn: { wq: wq0, wk: wk0, wv: wv0, wo: wo0 }
-                  , mlpNorm: mn0
-                  , mlp: { gateProj: gp0, upProj: up0, downProj: dp0 }
-                  }
-                , { attnNorm: an1
-                  , attn: { wq: wq1, wk: wk1, wv: wv1, wo: wo1 }
-                  , mlpNorm: mn1
-                  , mlp: { gateProj: gp1, upProj: up1, downProj: dp1 }
-                  }
-                ]
-            , finalNorm: fn
-            }
-          ropeTables = { cos: cosT, sin: sinT }
-        allocate (forwardLogits cfg weights ropeTables ids)
-    )
-    \r -> do
-      s <- shape r
-      assertEqArrayInt "forwardLogits output [seq=3, vocab=5]" [ 3, 5 ] s
+  runManaged_ do
+    emb <- allocate (ones [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2))
+    -- Layer 0
+    an0 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+    wq0 <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
+    wk0 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
+    wv0 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
+    wo0 <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
+    mn0 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+    gp0 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
+    up0 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
+    dp0 <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
+    -- Layer 1
+    an1 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+    wq1 <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
+    wk1 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
+    wv1 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
+    wo1 <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
+    mn1 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+    gp1 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
+    up1 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
+    dp1 <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
+    fn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+    rope <- lift (precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta)
+    cosT <- allocate (pure rope.cos)
+    sinT <- allocate (pure rope.sin)
+    ids <- allocate (arrayInt1D [ 0, 1, 2 ])
+    let
+      weights =
+        { embedding: emb
+        , layers:
+            [ { attnNorm: an0
+              , attn: { wq: wq0, wk: wk0, wv: wv0, wo: wo0 }
+              , mlpNorm: mn0
+              , mlp: { gateProj: gp0, upProj: up0, downProj: dp0 }
+              }
+            , { attnNorm: an1
+              , attn: { wq: wq1, wk: wk1, wv: wv1, wo: wo1 }
+              , mlpNorm: mn1
+              , mlp: { gateProj: gp1, upProj: up1, downProj: dp1 }
+              }
+            ]
+        , finalNorm: fn
+        }
+      ropeTables = { cos: cosT, sin: sinT }
+    out <- allocate (forwardLogits cfg weights ropeTables ids)
+    lift $ checkShape "forwardLogits output [seq=3, vocab=5]" [ 3, 5 ] (lit out)
 
 testSampling :: Effect Unit
 testSampling = do
@@ -803,68 +723,36 @@ testNumericalParity :: Effect Unit
 testNumericalParity = do
   log "Numerical parity (analytic checks):"
   -- 1. Matmul value parity: [[1,2],[3,4]] @ [[5,6],[7,8]] = [[19,22],[43,50]]
-  runManaged
-    ( do
-        aFlat <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0 ])
-        aFlatR <- lift (ref aFlat)
-        a <- allocate (reshape aFlatR [ 2, 2 ] :: Effect (NDArray D2))
-        bFlat <- allocate (array1D [ 5.0, 6.0, 7.0, 8.0 ])
-        bFlatR <- lift (ref bFlat)
-        b <- allocate (reshape bFlatR [ 2, 2 ] :: Effect (NDArray D2))
-        aR <- lift (ref a)
-        bR <- lift (ref b)
-        out <- allocate (matmul aR bR)
-        outR <- lift (ref out)
-        allocate (reshape outR [ 4 ] :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "matmul [[1,2],[3,4]] @ [[5,6],[7,8]]"
-        [ 19.0, 22.0, 43.0, 50.0 ]
-        (asArray1D f)
+  runManaged_ do
+    aFlat <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0 ])
+    bFlat <- allocate (array1D [ 5.0, 6.0, 7.0, 8.0 ])
+    let a = reshapeT (lit aFlat) [ 2, 2 ] :: T D2
+        b = reshapeT (lit bFlat) [ 2, 2 ] :: T D2
+    lift $ checkT "matmul [[1,2],[3,4]] @ [[5,6],[7,8]]"
+      [ 19.0, 22.0, 43.0, 50.0 ] (a **. b)
   -- 2. RMSNorm with non-uniform weight: input [4,4,4,4] (RMS=4),
   -- weight [0.5, 1.0, 1.5, 2.0]. After RMS-normalize, x is [1,1,1,1],
   -- then * weight = [0.5, 1.0, 1.5, 2.0].
-  runManaged
-    ( do
-        x <- allocate (array1D [ 4.0, 4.0, 4.0, 4.0 ])
-        w <- allocate (array1D [ 0.5, 1.0, 1.5, 2.0 ])
-        allocate (rmsnorm 1.0e-9 x w :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "RMSNorm with non-uniform weight"
-        [ 0.5, 1.0, 1.5, 2.0 ]
-        (asArray1D f)
+  runManaged_ do
+    x <- allocate (array1D [ 4.0, 4.0, 4.0, 4.0 ])
+    w <- allocate (array1D [ 0.5, 1.0, 1.5, 2.0 ])
+    out <- allocate (rmsnorm 1.0e-9 x w :: Effect (NDArray D1))
+    lift $ checkT "RMSNorm with non-uniform weight"
+      [ 0.5, 1.0, 1.5, 2.0 ] (lit out)
   -- 3. mean of arange[0..5]: (0+1+2+3+4)/5 = 2.0
-  runManaged
-    ( do
-        a <- allocate (arange 0.0 5.0 1.0)
-        aR <- lift (ref a)
-        allocate (mean aR :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
+  runManaged_ do
+    a <- allocate (arange 0.0 5.0 1.0)
+    aR <- lift (ref a)
+    m <- allocate (mean aR :: Effect (NDArray D1))
+    lift do
+      f <- toJs m
       assertCloseNum "mean(arange[0..5])" 2.0 (asNumber f)
   -- 4. matmul transpose: A @ A^T for A = [[1,2],[3,4]] = [[5,11],[11,25]]
-  runManaged
-    ( do
-        aFlat <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0 ])
-        aFlatR <- lift (ref aFlat)
-        a <- allocate (reshape aFlatR [ 2, 2 ] :: Effect (NDArray D2))
-        aR1 <- lift (ref a)
-        aT <- allocate (transpose aR1)
-        aR2 <- lift (ref a)
-        aTR <- lift (ref aT)
-        out <- allocate (matmul aR2 aTR)
-        outR <- lift (ref out)
-        allocate (reshape outR [ 4 ] :: Effect (NDArray D1))
-    )
-    \r -> do
-      f <- toJs r
-      assertCloseArray "A @ A^T for A=[[1,2],[3,4]]"
-        [ 5.0, 11.0, 11.0, 25.0 ]
-        (asArray1D f)
+  runManaged_ do
+    aFlat <- allocate (array1D [ 1.0, 2.0, 3.0, 4.0 ])
+    let a = reshapeT (lit aFlat) [ 2, 2 ] :: T D2
+    lift $ checkT "A @ A^T for A=[[1,2],[3,4]]"
+      [ 5.0, 11.0, 11.0, 25.0 ] (a **. T.transposeT a)
 
 -- | Regression test for the config codec.
 -- |
