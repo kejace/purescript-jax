@@ -27,6 +27,7 @@
 -- | sides of the autograd boundary.
 module Jax.Train
   ( TrainState
+  , initial
   , step
   , stepN
   ) where
@@ -39,31 +40,54 @@ import Jax.Coerce (asNumber)
 import Jax.Core (D1, NDArray, dispose, toJs)
 import Jax.Optax as Optax
 
--- | Mutable-only-by-replacement training state. Threaded through `step`
--- | by re-binding; nothing mutates in place. `lastLoss` is for
--- | reporting only; the real source of truth is the next gradient
--- | computation.
+-- | Training-loop state. Carries the previous step's gradient so the
+-- | next step can `updateT(grad) → applyUpdatesT → vagFn(newWeights)`
+-- | without consuming `weights` twice (jax-js's `valueAndGrad` and
+-- | `applyUpdatesT` both want to take ownership; staggering them like
+-- | this lets each call see a fresh tensor tree).
+-- |
+-- | Threaded by re-binding; nothing mutates in place.
 type TrainState p =
   { weights  :: p
   , optState :: Optax.OptState
+  , grad     :: p
   , lastLoss :: Number
   }
 
--- | One iteration of the standard autograd training loop:
+-- | Bootstrap a `TrainState` from the freshly-built parameters and a
+-- | pre-built `optState` (you'll have called `Optax.initT` on a
+-- | ref-bumped copy of weights yourself, since `initT` consumes its
+-- | argument). Runs the model once to compute the initial gradient
+-- | and loss, so that the very first call to `step` has something to
+-- | feed into `updateT`.
 -- |
--- |   1. forward the loss + accumulate gradients (one call to the
--- |      jit'd valueAndGrad function),
--- |   2. read the scalar loss back to the host,
--- |   3. dispose the loss tensor,
--- |   4. ask the optimizer for parameter updates,
--- |   5. apply them.
+-- | Why this exists: `valueAndGrad`'s wrapped function traces on its
+-- | first call. We force that here, before `step` enters the loop,
+-- | so the trace is cleanly tied to the original parameters and not
+-- | to whatever's left after `step`'s own consumption pattern.
+initial
+  :: forall p
+   . EffectFn1 p { value :: NDArray D1, grad :: p }
+  -> p
+  -> Optax.OptState
+  -> Effect (TrainState p)
+initial vagFn weights optState = do
+  vag <- runEffectFn1 vagFn weights
+  lossF <- toJs vag.value
+  dispose vag.value
+  pure
+    { weights, optState, grad: vag.grad, lastLoss: asNumber lossF }
+
+-- | One iteration. Order is load-bearing:
 -- |
--- | The valueAndGrad function is passed in (not constructed here) so
--- | the caller can build it once outside the loop and reuse the jit
--- | trace across all iterations.
+-- |   1. updateT consumes the gradient from the previous step.
+-- |   2. applyUpdatesT consumes the previous weights + the updates,
+-- |      returning fresh `newWeights`.
+-- |   3. vagFn is called on `newWeights`. Its result is the gradient
+-- |      that the NEXT step's updateT will consume.
 -- |
--- | Output gradient `vag.grad` is consumed by `updateT`, so the only
--- | tensor we explicitly dispose is the scalar loss.
+-- | Each tensor is consumed exactly once per step. The single host
+-- | round-trip is the loss readback (`toJs`).
 step
   :: forall p
    . Optax.Transformation
@@ -71,23 +95,24 @@ step
   -> TrainState p
   -> Effect (TrainState p)
 step opt vagFn s = do
-  vag <- runEffectFn1 vagFn s.weights
+  { updates, state: newState } <- Optax.updateT opt s.grad s.optState
+  newWeights <- Optax.applyUpdatesT s.weights updates
+  vag <- runEffectFn1 vagFn newWeights
   lossF <- toJs vag.value
   dispose vag.value
-  { updates, state: newState } <- Optax.updateT opt vag.grad s.optState
-  newWeights <- Optax.applyUpdatesT s.weights updates
   pure
     { weights: newWeights
     , optState: newState
+    , grad: vag.grad
     , lastLoss: asNumber lossF
     }
 
 -- | Run `step` `n` times, calling `report stepIdx state` after each
--- | iteration (1-indexed). Idiomatic uses:
+-- | iteration (1-indexed). Tail-recursive.
+-- |
+-- | Idiomatic:
 -- |
 -- |     stepN opt vagFn 1000 (\i s -> when (i `mod` 50 == 0) (log ...)) initial
--- |
--- | Tail-recursive (PureScript's compiler does TCO on this shape).
 stepN
   :: forall p
    . Optax.Transformation

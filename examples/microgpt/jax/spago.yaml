@@ -1,11 +1,15 @@
 package:
-  name: microgpt-faithful
+  name: microgpt-jax
   dependencies:
+    - aff
+    - aff-promise
     - arrays
     - console
     - effect
     - foldable-traversable
+    - foreign
     - integers
+    - jax
     - lists
     - maybe
     - numbers
@@ -17,7 +21,7 @@ package:
     - transformers
     - tuples
   bundle:
-    module: Microgpt.Faithful.Main
+    module: Microgpt.Jax.Main
     type: app
   run:
-    main: Microgpt.Faithful.Main
+    main: Microgpt.Jax.Main

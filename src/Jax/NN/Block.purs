@@ -20,6 +20,7 @@ module Jax.NN.Block
   , forwardCachedWithHead
   , emptyKVCacheStack
   , forwardCached
+  , refModelWeights
   ) where
 
 import Prelude hiding (add)
@@ -27,6 +28,7 @@ import Prelude hiding (add)
 import Control.Monad.Reader.Trans (ReaderT, ask, runReaderT)
 import Data.Array (snoc, zip) as Array
 import Data.Foldable (foldM)
+import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Class (liftEffect)
@@ -368,3 +370,40 @@ forwardCachedWithHead cfg w head rope cache startPos newIds = do
   hNormed <- rmsnorm cfg.normEps result.hidden w.finalNorm
   logits <- unembed hNormed head
   pure { newCache: result.cachesRev, logits }
+
+-- | Refcount-bump every NDArray leaf in a `ModelWeights`. Returns a
+-- | structurally-identical copy where each tensor is a fresh handle
+-- | sharing the same underlying buffer (refcount up by 1 per leaf).
+-- |
+-- | Use this when you need to pass a `ModelWeights` to an op that
+-- | consumes it (e.g. `Optax.initT`, which moves its argument into
+-- | the optimizer state) but you also want to keep the original alive
+-- | for the next call.
+-- |
+-- | The shape is hand-rolled rather than via heterogeneous-mapping
+-- | because a generic `refTree` would need to thread `Effect` through
+-- | the record/array traversals — significantly more wiring than the
+-- | one ModelWeights instance buys.
+refModelWeights :: ModelWeights -> Effect ModelWeights
+refModelWeights w = do
+  emb <- ref w.embedding
+  fn <- ref w.finalNorm
+  layers <- traverse refLayer w.layers
+  pure { embedding: emb, layers, finalNorm: fn }
+  where
+  refLayer lw = do
+    an <- ref lw.attnNorm
+    wq <- ref lw.attn.wq
+    wk <- ref lw.attn.wk
+    wv <- ref lw.attn.wv
+    wo <- ref lw.attn.wo
+    mn <- ref lw.mlpNorm
+    gp <- ref lw.mlp.gateProj
+    up <- ref lw.mlp.upProj
+    dp <- ref lw.mlp.downProj
+    pure
+      { attnNorm: an
+      , attn: { wq, wk, wv, wo }
+      , mlpNorm: mn
+      , mlp: { gateProj: gp, upProj: up, downProj: dp }
+      }

@@ -15,7 +15,7 @@
 -- | Performance: O(N²) per backward pass in the number of ops in the
 -- | computation graph. Fine for a 1-layer, 8-context, 32-vocab demo.
 -- | Don't even think about scaling.
-module Value
+module Microgpt.Faithful.Value
   ( Value
   , mk
   , add

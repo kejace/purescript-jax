@@ -3,6 +3,7 @@ module Jax.Random
   , mkKey
   , splitKey2
   , sampleCategorical
+  , normal
   ) where
 
 import Prelude
@@ -40,4 +41,17 @@ sampleCategorical key logits = do
   raw <- toJs idxArr
   dispose idxArr
   pure (asInt raw)
+
+foreign import normalImpl :: forall d. EffectFn2 Key (Array Int) (NDArray d)
+
+-- | Sample a tensor of standard-normal (mean 0, var 1) floats with the
+-- | given shape, drawn deterministically from `key`. Consumes the key.
+-- |
+-- | For Glorot/He init, scale the result by `sqrt(2 / (fan_in + fan_out))`
+-- | or whatever's appropriate for the activation:
+-- |
+-- |     w <- normal key [ inDim, outDim ]
+-- |     wScaled <- mulScalar w (sqrt (2.0 / toNumber (inDim + outDim)))
+normal :: forall d. Key -> Array Int -> Effect (NDArray d)
+normal = runEffectFn2 normalImpl
 

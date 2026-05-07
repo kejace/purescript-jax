@@ -18,7 +18,7 @@
 -- | Reimagined demo show the scaled-up version.
 -- |
 -- | Run from this directory: `bunx spago run`.
-module Main where
+module Microgpt.Faithful.Main where
 
 import Prelude
 
@@ -35,8 +35,8 @@ import Effect.Console (log)
 import Effect.Random (random)
 import Effect.Ref (Ref)
 import Effect.Ref as Ref
-import Value (Value)
-import Value as V
+import Microgpt.Faithful.Value (Value)
+import Microgpt.Faithful.Value as V
 
 -- =============================================================================
 -- Section 0: corpus (inline; see README for how to swap in names.txt)

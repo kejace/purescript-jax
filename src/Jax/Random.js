@@ -21,3 +21,9 @@ export const splitKey2Impl = (key) => {
 // For 1D logits with axis=-1, output is rank 0 (a scalar int32 NDArray).
 export const sampleCategoricalImpl = (key, logits) =>
   random.categorical(key, logits);
+
+// random.normal(key, shape) → tensor of standard-normal floats. The
+// PS-side `normal` consumes the key (jax-js's random.normal does not
+// auto-bump it); callers that need to sample twice should `splitKey2`
+// upfront.
+export const normalImpl = (key, shape) => random.normal(key, shape);
