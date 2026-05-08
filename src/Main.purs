@@ -12,11 +12,11 @@ import Jax.Core
   , ones
   , setDefaultDevice
   )
-import Jax.Managed (Managed, allocate, runManaged)
+import Jax.Managed (Managed, allocate, allocateT, runManaged)
 import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights)
 import Jax.NN.Generate (generateGreedyCached)
 import Jax.NN.RoPE (RoPETables, precomputeRoPE)
-import Jax.Shape.Tensor (unsafeAssumeShape)
+import Jax.Shape.Tensor.Op (onesWith) as Op
 
 -- | End-to-end demo: build a tiny synthetic model with all-ones weights,
 -- | run greedy autoregressive generation, log the result.
@@ -66,19 +66,19 @@ buildModel
   :: ModelConfig
   -> Managed { weights :: ModelWeights, rope :: RoPETables }
 buildModel cfg = do
-  emb <- allocate (ones [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2))
+  emb <- allocateT (Op.onesWith [ cfg.vocabSize, cfg.hidden ])
   layer0 <- buildLayer cfg
   layer1 <- buildLayer cfg
-  fn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+  fn <- allocateT (Op.onesWith [ cfg.hidden ])
   rope <- lift (precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta)
   cosT <- allocate (pure rope.cos)
   sinT <- allocate (pure rope.sin)
   let
     weights :: ModelWeights
     weights =
-      { embedding: unsafeAssumeShape emb
+      { embedding: emb
       , layers: [ layer0, layer1 ]
-      , finalNorm: unsafeAssumeShape fn
+      , finalNorm: fn
       }
     ropeTables = { cos: cosT, sin: sinT }
   pure { weights, rope: ropeTables }
@@ -87,27 +87,18 @@ buildLayer
   :: ModelConfig
   -> Managed LayerWeights
 buildLayer cfg = do
-  attnNorm <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-  wq <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-  wk <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-  wv <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-  wo <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-  mlpNorm <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-  gp <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-  up <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-  dp <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
+  attnNorm <- allocateT (Op.onesWith [ cfg.hidden ])
+  wq <- allocateT (Op.onesWith [ cfg.hidden, cfg.nHeads * cfg.headDim ])
+  wk <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+  wv <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+  wo <- allocateT (Op.onesWith [ cfg.nHeads * cfg.headDim, cfg.hidden ])
+  mlpNorm <- allocateT (Op.onesWith [ cfg.hidden ])
+  gp <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+  up <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+  dp <- allocateT (Op.onesWith [ cfg.intermediate, cfg.hidden ])
   pure
-    { attnNorm: unsafeAssumeShape attnNorm
-    , attn:
-        { wq: unsafeAssumeShape wq
-        , wk: unsafeAssumeShape wk
-        , wv: unsafeAssumeShape wv
-        , wo: unsafeAssumeShape wo
-        }
-    , mlpNorm: unsafeAssumeShape mlpNorm
-    , mlp:
-        { gateProj: unsafeAssumeShape gp
-        , upProj: unsafeAssumeShape up
-        , downProj: unsafeAssumeShape dp
-        }
+    { attnNorm
+    , attn: { wq, wk, wv, wo }
+    , mlpNorm
+    , mlp: { gateProj: gp, upProj: up, downProj: dp }
     }

@@ -21,11 +21,22 @@ module Jax.Shape.Tensor
   , unsafeAssumeShape
   , unsafeForgetShape
   , withRank
+  , refT
+  , disposeT
+  , shapeT
+  , squareT
+  , sumT
+  , toJsT
   ) where
 
+import Prelude
+
+import Effect (Effect)
+import Foreign (Foreign)
 import Unsafe.Coerce (unsafeCoerce)
 
 import Jax.Core (NDArray)
+import Jax.Core as Core
 import Jax.Shape (Shape, class RankOf)
 
 -- =============================================================================
@@ -86,3 +97,51 @@ unsafeForgetShape = unsafeCoerce
 -- | (still phantom-only); the type system rules out the wrong rank.
 withRank :: forall s d. RankOf s d => Tensor s -> NDArray d
 withRank = unsafeCoerce
+
+-- =============================================================================
+-- Shape-preserving lifecycle helpers
+-- =============================================================================
+--
+-- These are the shape-typed mirrors of `Core.ref` / `Core.dispose`.
+-- The body is a thin bridge: cast to NDArray, call the rank-only
+-- helper, cast back. Same runtime behavior as the rank-only
+-- versions; the visible type stays `Tensor s` so callers don't lose
+-- shape information at every refcount-bump site.
+
+-- | Refcount-bump a tensor, preserving its shape in the type. The
+-- | returned `Tensor s` has refcount one higher than the input;
+-- | jax-js's underlying handle is the same JS object.
+refT :: forall s. Tensor s -> Effect (Tensor s)
+refT t = do
+  bumped <- Core.ref (unsafeForgetShape t :: NDArray Core.D1)
+  pure (unsafeAssumeShape bumped)
+
+-- | Dispose a typed tensor. The shape phantom is irrelevant at
+-- | runtime; the underlying JS handle's refcount drops by one.
+disposeT :: forall s. Tensor s -> Effect Unit
+disposeT t = Core.dispose (unsafeForgetShape t :: NDArray Core.D1)
+
+-- | Read a typed tensor's runtime shape as `Array Int`. Same as
+-- | `Core.shape` but accepts `Tensor s` directly so callers don't
+-- | need an explicit `unsafeForgetShape`.
+shapeT :: forall s. Tensor s -> Effect (Array Int)
+shapeT t = Core.shape (unsafeForgetShape t :: NDArray Core.D1)
+
+-- | Element-wise square, shape-preserving. Wraps `Core.square`.
+squareT :: forall s. Tensor s -> Effect (Tensor s)
+squareT t = do
+  result <- Core.square (unsafeForgetShape t :: NDArray Core.D1)
+  pure (unsafeAssumeShape result)
+
+-- | Reduce-all sum to a scalar. Output shape is open — typically
+-- | `SNil` (rank-0 scalar), but the Core op signature is rank-open
+-- | so callers may ascribe whatever fits the surrounding context.
+sumT :: forall s s'. Tensor s -> Effect (Tensor s')
+sumT t = do
+  result <- Core.sum (unsafeForgetShape t :: NDArray Core.D1)
+  pure (unsafeAssumeShape result)
+
+-- | Read a typed tensor back to host as a `Foreign` JS value (for
+-- | `Jax.Coerce.asNumber`/`asArray*` consumption). Wraps `Core.toJs`.
+toJsT :: forall s. Tensor s -> Effect Foreign
+toJsT t = Core.toJs (unsafeForgetShape t :: NDArray Core.D1)

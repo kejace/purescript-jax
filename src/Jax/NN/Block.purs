@@ -59,8 +59,8 @@ import Jax.NN.Embed (embed, unembed)
 import Jax.NN.MLP (mlp)
 import Jax.NN.RMSNorm (rmsnorm)
 import Jax.NN.RoPE (RoPETables, applyRoPE)
-import Jax.Shape (Var, S1, S2)
-import Jax.Shape.Tensor (Tensor, unsafeAssumeShape, unsafeForgetShape)
+import Jax.Shape (class RankOf, Var, S1, S2)
+import Jax.Shape.Tensor (Tensor, refT, unsafeAssumeShape, withRank)
 import Jax.Tensor as T
 
 -- | Static model hyperparameters (no tensors here).
@@ -144,19 +144,21 @@ type ModelWeights =
 -- The rank-only forward path (which uses Jax.Tensor's T DSL, jax-js
 -- ops, attention / mlp / rmsnorm, applyRoPE) consumes `NDArray d`.
 -- Typed weight fields (`Tensor (S2 ...)`) share a runtime
--- representation, so the bridge is phantom-only via `unsafeForgetShape`.
--- Defined here so the body reads cleanly: `asD2 w.wq` instead of
--- `unsafeForgetShape w.wq :: NDArray D2` at every use site.
+-- representation, so the bridge is the `withRank` typed helper —
+-- rank-checked at the type level via `RankOf`, phantom-only at
+-- runtime. `asD2` / `asD1` are local aliases that pin the result rank
+-- where the surrounding context is rank-polymorphic (e.g. inside a
+-- `T.lit ...` whose result rank is determined elsewhere).
 --
 -- Going the other direction (NDArray d → Tensor s) is needed by
 -- `unsafeAssumeShape`, used at boundaries that *produce* weight
 -- values (loaders, allocators).
 
-asD2 :: forall s. Tensor s -> NDArray D2
-asD2 = unsafeForgetShape
+asD2 :: forall s. RankOf s D2 => Tensor s -> NDArray D2
+asD2 = withRank
 
-asD1 :: forall s. Tensor s -> NDArray D1
-asD1 = unsafeForgetShape
+asD1 :: forall s. RankOf s D1 => Tensor s -> NDArray D1
+asD1 = withRank
 
 -- =============================================================================
 -- Internal: Forward = ReaderT { cfg } Effect
@@ -443,37 +445,24 @@ forwardCachedWithHead cfg w head rope cache startPos newIds = do
 -- | one ModelWeights instance buys.
 refModelWeights :: ModelWeights -> Effect ModelWeights
 refModelWeights w = do
-  emb <- ref (asD2 w.embedding)
-  fn <- ref (asD1 w.finalNorm)
+  emb <- refT w.embedding
+  fn <- refT w.finalNorm
   layers <- traverse refLayer w.layers
-  pure
-    { embedding: unsafeAssumeShape emb
-    , layers
-    , finalNorm: unsafeAssumeShape fn
-    }
+  pure { embedding: emb, layers, finalNorm: fn }
   where
   refLayer lw = do
-    an <- ref (asD1 lw.attnNorm)
-    wq <- ref (asD2 lw.attn.wq)
-    wk <- ref (asD2 lw.attn.wk)
-    wv <- ref (asD2 lw.attn.wv)
-    wo <- ref (asD2 lw.attn.wo)
-    mn <- ref (asD1 lw.mlpNorm)
-    gp <- ref (asD2 lw.mlp.gateProj)
-    up <- ref (asD2 lw.mlp.upProj)
-    dp <- ref (asD2 lw.mlp.downProj)
+    an <- refT lw.attnNorm
+    wq <- refT lw.attn.wq
+    wk <- refT lw.attn.wk
+    wv <- refT lw.attn.wv
+    wo <- refT lw.attn.wo
+    mn <- refT lw.mlpNorm
+    gp <- refT lw.mlp.gateProj
+    up <- refT lw.mlp.upProj
+    dp <- refT lw.mlp.downProj
     pure
-      { attnNorm: unsafeAssumeShape an
-      , attn:
-          { wq: unsafeAssumeShape wq
-          , wk: unsafeAssumeShape wk
-          , wv: unsafeAssumeShape wv
-          , wo: unsafeAssumeShape wo
-          }
-      , mlpNorm: unsafeAssumeShape mn
-      , mlp:
-          { gateProj: unsafeAssumeShape gp
-          , upProj: unsafeAssumeShape up
-          , downProj: unsafeAssumeShape dp
-          }
+      { attnNorm: an
+      , attn: { wq, wk, wv, wo }
+      , mlpNorm: mn
+      , mlp: { gateProj: gp, upProj: up, downProj: dp }
       }

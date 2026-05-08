@@ -49,7 +49,9 @@ import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights, refModelWeights)
 import Jax.NN.Generate (generateTemperature)
 import Jax.NN.RoPE (RoPETables, precomputeRoPE)
 import Jax.NN.Train (makeCrossEntropyLoss)
-import Jax.Shape.Tensor (unsafeAssumeShape)
+import Jax.Shape (S2)
+import Jax.Shape.Tensor (Tensor, unsafeAssumeShape)
+import Jax.Shape.Tensor.Op (onesWith) as Op
 import Jax.Optax as Optax
 import Jax.Optax.Schedule as Schedule
 import Jax.Random (Key)
@@ -297,56 +299,47 @@ mkKeySource k0 = do
     Ref.write b cell
     pure a
 
--- | Glorot-scaled normal for a 2D linear weight.
+-- | Glorot-scaled normal for a 2D linear weight. Returns a typed
+-- | `Tensor (S2 a b)` directly — the unsafe shape claim is confined
+-- | inside this helper rather than spread across each caller.
 glorotMat
-  :: Effect Key
-  -> Int -> Int
-  -> Effect (NDArray D2)
+  :: forall a b
+   . Effect Key
+  -> Int
+  -> Int
+  -> Effect (Tensor (S2 a b))
 glorotMat nextKey rows cols = do
   k <- nextKey
   raw <- Random.normal k [ rows, cols ]
   rawR <- ref raw
   scaled <- mulScalar rawR (N.sqrt (2.0 / toNumber (rows + cols)))
   dispose raw
-  pure scaled
+  -- The single shape claim for the helper. Callers consume the
+  -- typed result and the type system threads it onward.
+  pure (unsafeAssumeShape (scaled :: NDArray D2))
 
 buildWeights :: Key -> ModelConfig -> Effect ModelWeights
 buildWeights k0 cfg = do
   nextKey <- mkKeySource k0
   embedding <- glorotMat nextKey cfg.vocabSize cfg.hidden
-  finalNorm <- ones [ cfg.hidden ] :: Effect (NDArray D1)
+  finalNorm <- Op.onesWith [ cfg.hidden ]
   layers <- traverse (\_ -> buildLayer nextKey cfg) (Array.range 1 cfg.nLayers)
-  -- Cast to typed weight record. Shape claims match the constructed
-  -- runtime layout (built deterministically from cfg).
-  pure
-    { embedding: unsafeAssumeShape embedding
-    , layers
-    , finalNorm: unsafeAssumeShape finalNorm
-    }
+  pure { embedding, layers, finalNorm }
 
 buildLayer :: Effect Key -> ModelConfig -> Effect LayerWeights
 buildLayer nextKey cfg = do
-  attnNorm <- ones [ cfg.hidden ] :: Effect (NDArray D1)
+  attnNorm <- Op.onesWith [ cfg.hidden ]
   wq <- glorotMat nextKey cfg.hidden (cfg.nHeads * cfg.headDim)
   wk <- glorotMat nextKey cfg.hidden (cfg.nKvHeads * cfg.headDim)
   wv <- glorotMat nextKey cfg.hidden (cfg.nKvHeads * cfg.headDim)
   wo <- glorotMat nextKey (cfg.nHeads * cfg.headDim) cfg.hidden
-  mlpNorm <- ones [ cfg.hidden ] :: Effect (NDArray D1)
+  mlpNorm <- Op.onesWith [ cfg.hidden ]
   gateProj <- glorotMat nextKey cfg.hidden cfg.intermediate
   upProj <- glorotMat nextKey cfg.hidden cfg.intermediate
   downProj <- glorotMat nextKey cfg.intermediate cfg.hidden
   pure
-    { attnNorm: unsafeAssumeShape attnNorm
-    , attn:
-        { wq: unsafeAssumeShape wq
-        , wk: unsafeAssumeShape wk
-        , wv: unsafeAssumeShape wv
-        , wo: unsafeAssumeShape wo
-        }
-    , mlpNorm: unsafeAssumeShape mlpNorm
-    , mlp:
-        { gateProj: unsafeAssumeShape gateProj
-        , upProj: unsafeAssumeShape upProj
-        , downProj: unsafeAssumeShape downProj
-        }
+    { attnNorm
+    , attn: { wq, wk, wv, wo }
+    , mlpNorm
+    , mlp: { gateProj, upProj, downProj }
     }

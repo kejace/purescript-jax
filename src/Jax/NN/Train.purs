@@ -29,7 +29,7 @@ import Jax.NN.Block
   , transformerBlocksAndNorm
   )
 import Jax.NN.RoPE (RoPETables)
-import Jax.Shape.Tensor (unsafeForgetShape)
+import Jax.Shape.Tensor (withRank)
 
 -- | Build a one-arg cross-entropy loss closing over `cfg`, `rope`, the
 -- | input prompt, and target token IDs (one per position). Plugs into
@@ -51,12 +51,12 @@ makeCrossEntropyLoss
 makeCrossEntropyLoss cfg rope prompt targets = mkEffectFn1 \weights -> do
   promptR <- ref prompt
   promptOh <- oneHot promptR cfg.vocabSize
-  embR1 <- ref (unsafeForgetShape weights.embedding :: NDArray D2)
+  embR1 <- ref (withRank weights.embedding :: NDArray D2)
   hidden0 <- matmul promptOh embR1
   hidden0Shape <- shape hidden0
   let seqLen = fromMaybe 0 (Array.head hidden0Shape)
   hiddenN <- transformerBlocksAndNorm cfg weights rope seqLen hidden0
-  embR2 <- ref (unsafeForgetShape weights.embedding :: NDArray D2)
+  embR2 <- ref (withRank weights.embedding :: NDArray D2)
   embT <- transpose embR2
   logits <- matmul hiddenN embT
   logProbs <- logSoftmax logits (-1)

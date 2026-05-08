@@ -16,6 +16,8 @@ module Jax.Shape.Tensor.Op
   ( -- * Allocators (concrete shape via type ascription)
     zeros
   , ones
+  , zerosWith
+  , onesWith
     -- * Binary
   , matmul
   , add
@@ -79,6 +81,23 @@ zeros pShape = do
 ones :: forall s. ReflectShape s => SProxy s -> Effect (Tensor s)
 ones pShape = do
   result <- Core.ones (reflectShape pShape)
+  pure (unsafeAssumeShape (result :: NDArray Core.D1))
+
+-- | Allocate with a runtime size array, caller-asserted shape. The
+-- | "With" suffix mirrors the `reshapeUnchecked` / `reshapeUncheckedT`
+-- | naming: caller takes responsibility for `dims` matching `s`. Use
+-- | this when `s` contains `Var` dims (where `ReflectShape` doesn't
+-- | apply) — most NN code, where layer shapes come from a runtime
+-- | `ModelConfig`. For fully-`Lit` shapes prefer `zeros` / `ones`.
+zerosWith :: forall s. Array Int -> Effect (Tensor s)
+zerosWith dims = do
+  result <- Core.zeros dims
+  pure (unsafeAssumeShape (result :: NDArray Core.D1))
+
+-- | See `zerosWith`.
+onesWith :: forall s. Array Int -> Effect (Tensor s)
+onesWith dims = do
+  result <- Core.ones dims
   pure (unsafeAssumeShape (result :: NDArray Core.D1))
 
 -- =============================================================================

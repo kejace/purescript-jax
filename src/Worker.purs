@@ -19,15 +19,16 @@ import Effect.Ref as Ref
 import Effect.Uncurried (EffectFn1, runEffectFn1)
 import Jax.Coerce (asArray1D, asArray1DInt, asNumber)
 import Jax.Core (D1, D2, NDArray, arrayInt1D, dimAt, dispose, linspace, ref, reshape, sliceAxis, toJs, topK)
+import Jax.Core as Core
 import Jax.Loaders.Config (parseLlamaConfig, probeRawExtras)
 import Jax.Loaders.Fetch (fetchBytes, fetchText)
 import Jax.Loaders.LlamaAdapter (loadLlamaWeights)
 import Jax.Loaders.Safetensors (parseSafetensors, tensorNames)
 import Jax.Loaders.SentencePieceBPE (SentencePieceBPE)
 import Jax.Loaders.SentencePieceBPE as SBPE
-import Jax.Managed (Managed, allocate, runManaged)
+import Jax.Managed (Managed, allocate, allocateT, runManaged)
 import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights, emptyKVCacheStack, forwardCachedWithHead)
-import Jax.Shape.Tensor (unsafeAssumeShape, unsafeForgetShape)
+import Jax.Shape.Tensor (Tensor, refT, unsafeAssumeShape, unsafeForgetShape)
 import Jax.NN.Generate
   ( generateGreedyCached
   , generateGreedyCachedStream
@@ -442,58 +443,53 @@ benchOne prompt maxNew backend = do
 
 -- Synthetic model (only used by the benchmark sweep) ------------------------
 
-varyingWeight :: forall d. Array Int -> Effect (NDArray d)
+-- | Linspace-derived varying-init weight, returned as a typed
+-- | `Tensor s` (caller asserts the shape via the surrounding
+-- | type ascription on the binding).
+varyingWeight :: forall s. Array Int -> Effect (Tensor s)
 varyingWeight sh = do
   let n = foldl (*) 1 sh
   base <- linspace (-0.1) 0.1 n
   baseR <- ref base
-  reshape baseR sh
+  reshaped <- reshape baseR sh
+  pure (unsafeAssumeShape (reshaped :: NDArray Core.D1))
 
 buildSyntheticModel
   :: ModelConfig
   -> Managed { weights :: ModelWeights, rope :: RoPETables }
 buildSyntheticModel cfg = do
-  emb <- allocate (varyingWeight [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2))
+  emb <- allocateT (varyingWeight [ cfg.vocabSize, cfg.hidden ])
   layer0 <- buildSyntheticLayer cfg
   layer1 <- buildSyntheticLayer cfg
-  fn <- allocate (varyingWeight [ cfg.hidden ] :: Effect (NDArray D1))
+  fn <- allocateT (varyingWeight [ cfg.hidden ])
   rope <- lift (precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta)
   cosT <- allocate (pure rope.cos)
   sinT <- allocate (pure rope.sin)
   let
     weights =
-      { embedding: unsafeAssumeShape emb
+      { embedding: emb
       , layers: [ layer0, layer1 ]
-      , finalNorm: unsafeAssumeShape fn
+      , finalNorm: fn
       }
     ropeTables = { cos: cosT, sin: sinT }
   pure { weights, rope: ropeTables }
 
 buildSyntheticLayer :: ModelConfig -> Managed LayerWeights
 buildSyntheticLayer cfg = do
-  attnNorm <- allocate (varyingWeight [ cfg.hidden ] :: Effect (NDArray D1))
-  wq <- allocate (varyingWeight [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-  wk <- allocate (varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-  wv <- allocate (varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-  wo <- allocate (varyingWeight [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-  mlpNorm <- allocate (varyingWeight [ cfg.hidden ] :: Effect (NDArray D1))
-  gp <- allocate (varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-  up <- allocate (varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-  dp <- allocate (varyingWeight [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
+  attnNorm <- allocateT (varyingWeight [ cfg.hidden ])
+  wq <- allocateT (varyingWeight [ cfg.hidden, cfg.nHeads * cfg.headDim ])
+  wk <- allocateT (varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+  wv <- allocateT (varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+  wo <- allocateT (varyingWeight [ cfg.nHeads * cfg.headDim, cfg.hidden ])
+  mlpNorm <- allocateT (varyingWeight [ cfg.hidden ])
+  gp <- allocateT (varyingWeight [ cfg.hidden, cfg.intermediate ])
+  up <- allocateT (varyingWeight [ cfg.hidden, cfg.intermediate ])
+  dp <- allocateT (varyingWeight [ cfg.intermediate, cfg.hidden ])
   pure
-    { attnNorm: unsafeAssumeShape attnNorm
-    , attn:
-        { wq: unsafeAssumeShape wq
-        , wk: unsafeAssumeShape wk
-        , wv: unsafeAssumeShape wv
-        , wo: unsafeAssumeShape wo
-        }
-    , mlpNorm: unsafeAssumeShape mlpNorm
-    , mlp:
-        { gateProj: unsafeAssumeShape gp
-        , upProj: unsafeAssumeShape up
-        , downProj: unsafeAssumeShape dp
-        }
+    { attnNorm
+    , attn: { wq, wk, wv, wo }
+    , mlpNorm
+    , mlp: { gateProj: gp, upProj: up, downProj: dp }
     }
 
 -- Training: synthetic small transformer ------------------------------------
@@ -503,38 +499,25 @@ buildSyntheticLayer cfg = do
 -- | tests' `buildVaryingWeights`.
 buildSyntheticWeights :: ModelConfig -> Effect ModelWeights
 buildSyntheticWeights cfg = do
-  emb <- varyingWeight [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2)
-  fn <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
+  emb <- varyingWeight [ cfg.vocabSize, cfg.hidden ]
+  fn <- varyingWeight [ cfg.hidden ]
   layers <- traverseN' cfg.nLayers \_ -> do
-    attnNorm <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
-    wq <- varyingWeight [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2)
-    wk <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2)
-    wv <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2)
-    wo <- varyingWeight [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2)
-    mlpNorm <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
-    gp <- varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2)
-    up <- varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2)
-    dp <- varyingWeight [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2)
+    attnNorm <- varyingWeight [ cfg.hidden ]
+    wq <- varyingWeight [ cfg.hidden, cfg.nHeads * cfg.headDim ]
+    wk <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ]
+    wv <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ]
+    wo <- varyingWeight [ cfg.nHeads * cfg.headDim, cfg.hidden ]
+    mlpNorm <- varyingWeight [ cfg.hidden ]
+    gp <- varyingWeight [ cfg.hidden, cfg.intermediate ]
+    up <- varyingWeight [ cfg.hidden, cfg.intermediate ]
+    dp <- varyingWeight [ cfg.intermediate, cfg.hidden ]
     pure
-      { attnNorm: unsafeAssumeShape attnNorm
-      , attn:
-          { wq: unsafeAssumeShape wq
-          , wk: unsafeAssumeShape wk
-          , wv: unsafeAssumeShape wv
-          , wo: unsafeAssumeShape wo
-          }
-      , mlpNorm: unsafeAssumeShape mlpNorm
-      , mlp:
-          { gateProj: unsafeAssumeShape gp
-          , upProj: unsafeAssumeShape up
-          , downProj: unsafeAssumeShape dp
-          }
+      { attnNorm
+      , attn: { wq, wk, wv, wo }
+      , mlpNorm
+      , mlp: { gateProj: gp, upProj: up, downProj: dp }
       }
-  pure
-    { embedding: unsafeAssumeShape emb
-    , layers
-    , finalNorm: unsafeAssumeShape fn
-    }
+  pure { embedding: emb, layers, finalNorm: fn }
 
 traverseN' :: forall a. Int -> (Int -> Effect a) -> Effect (Array a)
 traverseN' n f = go 0 []
@@ -550,39 +533,26 @@ traverseN' n f = go 0 []
 -- | consumes its input.
 refModelWeights :: ModelWeights -> Effect ModelWeights
 refModelWeights w = do
-  emb <- ref (unsafeForgetShape w.embedding :: NDArray D2)
-  fn <- ref (unsafeForgetShape w.finalNorm :: NDArray D1)
+  emb <- refT w.embedding
+  fn <- refT w.finalNorm
   layers <- traverse refLayer w.layers
-  pure
-    { embedding: unsafeAssumeShape emb
-    , layers
-    , finalNorm: unsafeAssumeShape fn
-    }
+  pure { embedding: emb, layers, finalNorm: fn }
   where
   refLayer lw = do
-    an <- ref (unsafeForgetShape lw.attnNorm :: NDArray D1)
-    wq <- ref (unsafeForgetShape lw.attn.wq :: NDArray D2)
-    wk <- ref (unsafeForgetShape lw.attn.wk :: NDArray D2)
-    wv <- ref (unsafeForgetShape lw.attn.wv :: NDArray D2)
-    wo <- ref (unsafeForgetShape lw.attn.wo :: NDArray D2)
-    mn <- ref (unsafeForgetShape lw.mlpNorm :: NDArray D1)
-    gp <- ref (unsafeForgetShape lw.mlp.gateProj :: NDArray D2)
-    up <- ref (unsafeForgetShape lw.mlp.upProj :: NDArray D2)
-    dp <- ref (unsafeForgetShape lw.mlp.downProj :: NDArray D2)
+    an <- refT lw.attnNorm
+    wq <- refT lw.attn.wq
+    wk <- refT lw.attn.wk
+    wv <- refT lw.attn.wv
+    wo <- refT lw.attn.wo
+    mn <- refT lw.mlpNorm
+    gp <- refT lw.mlp.gateProj
+    up <- refT lw.mlp.upProj
+    dp <- refT lw.mlp.downProj
     pure
-      { attnNorm: unsafeAssumeShape an
-      , attn:
-          { wq: unsafeAssumeShape wq
-          , wk: unsafeAssumeShape wk
-          , wv: unsafeAssumeShape wv
-          , wo: unsafeAssumeShape wo
-          }
-      , mlpNorm: unsafeAssumeShape mn
-      , mlp:
-          { gateProj: unsafeAssumeShape gp
-          , upProj: unsafeAssumeShape up
-          , downProj: unsafeAssumeShape dp
-          }
+      { attnNorm: an
+      , attn: { wq, wk, wv, wo }
+      , mlpNorm: mn
+      , mlp: { gateProj: gp, upProj: up, downProj: dp }
       }
 
 -- | Run a synthetic-transformer training demo: small ModelWeights,

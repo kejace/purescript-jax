@@ -37,7 +37,7 @@ import Jax.Core
   , toJs
   , zeros
   )
-import Jax.Managed (Managed, allocate, runManaged)
+import Jax.Managed (Managed, allocate, allocateT, runManaged)
 import Jax.Tensor (T, lit, reshapeT, run, (+.), (-.), (*.), (**.))
 import Jax.Tensor as T
 import Jax.NN.Attention (attention)
@@ -56,7 +56,8 @@ import Effect.Ref as Ref
 import Jax.Optax as Optax
 import Jax.Autodiff (sumSquareLoss, sumSquareTreeLoss, valueAndGrad, valueAndGradT)
 import Effect.Uncurried (EffectFn1, mkEffectFn1, runEffectFn1)
-import Jax.Shape.Tensor (unsafeAssumeShape, unsafeForgetShape)
+import Jax.Shape.Tensor (Tensor, disposeT, refT, squareT, sumT, toJsT, unsafeAssumeShape)
+import Jax.Shape.Tensor.Op (onesWith) as Op
 import Test.Shape as TestShape
 import Test.ShapeOps as TestShapeOps
 import Test.ShapeNN as TestShapeNN
@@ -468,55 +469,46 @@ testBlock = do
       , normEps: 1.0e-6
       }
   runManaged_ do
-    emb <- allocate (ones [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2))
+    emb <- allocateT (Op.onesWith [ cfg.vocabSize, cfg.hidden ])
     -- Layer 0
-    an0 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-    wq0 <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-    wk0 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-    wv0 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-    wo0 <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-    mn0 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-    gp0 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-    up0 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-    dp0 <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
+    an0 <- allocateT (Op.onesWith [ cfg.hidden ])
+    wq0 <- allocateT (Op.onesWith [ cfg.hidden, cfg.nHeads * cfg.headDim ])
+    wk0 <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+    wv0 <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+    wo0 <- allocateT (Op.onesWith [ cfg.nHeads * cfg.headDim, cfg.hidden ])
+    mn0 <- allocateT (Op.onesWith [ cfg.hidden ])
+    gp0 <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+    up0 <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+    dp0 <- allocateT (Op.onesWith [ cfg.intermediate, cfg.hidden ])
     -- Layer 1
-    an1 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-    wq1 <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-    wk1 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-    wv1 <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-    wo1 <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-    mn1 <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-    gp1 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-    up1 <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-    dp1 <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
-    fn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+    an1 <- allocateT (Op.onesWith [ cfg.hidden ])
+    wq1 <- allocateT (Op.onesWith [ cfg.hidden, cfg.nHeads * cfg.headDim ])
+    wk1 <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+    wv1 <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+    wo1 <- allocateT (Op.onesWith [ cfg.nHeads * cfg.headDim, cfg.hidden ])
+    mn1 <- allocateT (Op.onesWith [ cfg.hidden ])
+    gp1 <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+    up1 <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+    dp1 <- allocateT (Op.onesWith [ cfg.intermediate, cfg.hidden ])
+    fn <- allocateT (Op.onesWith [ cfg.hidden ])
     rope <- lift (precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta)
     cosT <- allocate (pure rope.cos)
     sinT <- allocate (pure rope.sin)
     ids <- allocate (arrayInt1D [ 0, 1, 2 ])
     let
-      typedLayer attnNorm wq wk wv wo mlpNorm gp up dp =
-        { attnNorm: unsafeAssumeShape attnNorm
-        , attn:
-            { wq: unsafeAssumeShape wq
-            , wk: unsafeAssumeShape wk
-            , wv: unsafeAssumeShape wv
-            , wo: unsafeAssumeShape wo
-            }
-        , mlpNorm: unsafeAssumeShape mlpNorm
-        , mlp:
-            { gateProj: unsafeAssumeShape gp
-            , upProj: unsafeAssumeShape up
-            , downProj: unsafeAssumeShape dp
-            }
+      mkLayer attnNorm wq wk wv wo mlpNorm gp up dp =
+        { attnNorm
+        , attn: { wq, wk, wv, wo }
+        , mlpNorm
+        , mlp: { gateProj: gp, upProj: up, downProj: dp }
         }
       weights =
-        { embedding: unsafeAssumeShape emb
+        { embedding: emb
         , layers:
-            [ typedLayer an0 wq0 wk0 wv0 wo0 mn0 gp0 up0 dp0
-            , typedLayer an1 wq1 wk1 wv1 wo1 mn1 gp1 up1 dp1
+            [ mkLayer an0 wq0 wk0 wv0 wo0 mn0 gp0 up0 dp0
+            , mkLayer an1 wq1 wk1 wv1 wo1 mn1 gp1 up1 dp1
             ]
-        , finalNorm: unsafeAssumeShape fn
+        , finalNorm: fn
         }
       ropeTables = { cos: cosT, sin: sinT }
     out <- allocate (forwardLogits cfg weights ropeTables ids)
@@ -550,40 +542,31 @@ testGenerate = do
       }
   runManaged
     ( do
-        emb <- allocate (ones [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2))
-        an <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        wq <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wk <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wv <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wo <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-        mn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        gp <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        up <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        dp <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
-        fn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+        emb <- allocateT (Op.onesWith [ cfg.vocabSize, cfg.hidden ])
+        an <- allocateT (Op.onesWith [ cfg.hidden ])
+        wq <- allocateT (Op.onesWith [ cfg.hidden, cfg.nHeads * cfg.headDim ])
+        wk <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+        wv <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+        wo <- allocateT (Op.onesWith [ cfg.nHeads * cfg.headDim, cfg.hidden ])
+        mn <- allocateT (Op.onesWith [ cfg.hidden ])
+        gp <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+        up <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+        dp <- allocateT (Op.onesWith [ cfg.intermediate, cfg.hidden ])
+        fn <- allocateT (Op.onesWith [ cfg.hidden ])
         rope <- lift (precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta)
         cosT <- allocate (pure rope.cos)
         sinT <- allocate (pure rope.sin)
         let
           weights =
-            { embedding: unsafeAssumeShape emb
+            { embedding: emb
             , layers:
-                [ { attnNorm: unsafeAssumeShape an
-                  , attn:
-                      { wq: unsafeAssumeShape wq
-                      , wk: unsafeAssumeShape wk
-                      , wv: unsafeAssumeShape wv
-                      , wo: unsafeAssumeShape wo
-                      }
-                  , mlpNorm: unsafeAssumeShape mn
-                  , mlp:
-                      { gateProj: unsafeAssumeShape gp
-                      , upProj: unsafeAssumeShape up
-                      , downProj: unsafeAssumeShape dp
-                      }
+                [ { attnNorm: an
+                  , attn: { wq, wk, wv, wo }
+                  , mlpNorm: mn
+                  , mlp: { gateProj: gp, upProj: up, downProj: dp }
                   }
                 ]
-            , finalNorm: unsafeAssumeShape fn
+            , finalNorm: fn
             }
           ropeTables = { cos: cosT, sin: sinT }
         lift (generateGreedy cfg weights ropeTables [ 0, 1 ] 3)
@@ -595,40 +578,31 @@ testGenerate = do
   -- Cached vs naive parity: they should produce identical sequences.
   runManaged
     ( do
-        emb <- allocate (ones [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2))
-        an <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        wq <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wk <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wv <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wo <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-        mn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        gp <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        up <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        dp <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
-        fn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+        emb <- allocateT (Op.onesWith [ cfg.vocabSize, cfg.hidden ])
+        an <- allocateT (Op.onesWith [ cfg.hidden ])
+        wq <- allocateT (Op.onesWith [ cfg.hidden, cfg.nHeads * cfg.headDim ])
+        wk <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+        wv <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+        wo <- allocateT (Op.onesWith [ cfg.nHeads * cfg.headDim, cfg.hidden ])
+        mn <- allocateT (Op.onesWith [ cfg.hidden ])
+        gp <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+        up <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+        dp <- allocateT (Op.onesWith [ cfg.intermediate, cfg.hidden ])
+        fn <- allocateT (Op.onesWith [ cfg.hidden ])
         rope <- lift (precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta)
         cosT <- allocate (pure rope.cos)
         sinT <- allocate (pure rope.sin)
         let
           weights =
-            { embedding: unsafeAssumeShape emb
+            { embedding: emb
             , layers:
-                [ { attnNorm: unsafeAssumeShape an
-                  , attn:
-                      { wq: unsafeAssumeShape wq
-                      , wk: unsafeAssumeShape wk
-                      , wv: unsafeAssumeShape wv
-                      , wo: unsafeAssumeShape wo
-                      }
-                  , mlpNorm: unsafeAssumeShape mn
-                  , mlp:
-                      { gateProj: unsafeAssumeShape gp
-                      , upProj: unsafeAssumeShape up
-                      , downProj: unsafeAssumeShape dp
-                      }
+                [ { attnNorm: an
+                  , attn: { wq, wk, wv, wo }
+                  , mlpNorm: mn
+                  , mlp: { gateProj: gp, upProj: up, downProj: dp }
                   }
                 ]
-            , finalNorm: unsafeAssumeShape fn
+            , finalNorm: fn
             }
           ropeTables = { cos: cosT, sin: sinT }
         naive <- lift (generateGreedy cfg weights ropeTables [ 0, 1 ] 3)
@@ -640,40 +614,31 @@ testGenerate = do
   -- Temperature-sampled generation: verify length and that low-temp ~ greedy.
   runManaged
     ( do
-        emb <- allocate (ones [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2))
-        an <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        wq <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wk <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wv <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wo <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-        mn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        gp <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        up <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        dp <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
-        fn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+        emb <- allocateT (Op.onesWith [ cfg.vocabSize, cfg.hidden ])
+        an <- allocateT (Op.onesWith [ cfg.hidden ])
+        wq <- allocateT (Op.onesWith [ cfg.hidden, cfg.nHeads * cfg.headDim ])
+        wk <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+        wv <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+        wo <- allocateT (Op.onesWith [ cfg.nHeads * cfg.headDim, cfg.hidden ])
+        mn <- allocateT (Op.onesWith [ cfg.hidden ])
+        gp <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+        up <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+        dp <- allocateT (Op.onesWith [ cfg.intermediate, cfg.hidden ])
+        fn <- allocateT (Op.onesWith [ cfg.hidden ])
         rope <- lift (precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta)
         cosT <- allocate (pure rope.cos)
         sinT <- allocate (pure rope.sin)
         let
           weights =
-            { embedding: unsafeAssumeShape emb
+            { embedding: emb
             , layers:
-                [ { attnNorm: unsafeAssumeShape an
-                  , attn:
-                      { wq: unsafeAssumeShape wq
-                      , wk: unsafeAssumeShape wk
-                      , wv: unsafeAssumeShape wv
-                      , wo: unsafeAssumeShape wo
-                      }
-                  , mlpNorm: unsafeAssumeShape mn
-                  , mlp:
-                      { gateProj: unsafeAssumeShape gp
-                      , upProj: unsafeAssumeShape up
-                      , downProj: unsafeAssumeShape dp
-                      }
+                [ { attnNorm: an
+                  , attn: { wq, wk, wv, wo }
+                  , mlpNorm: mn
+                  , mlp: { gateProj: gp, upProj: up, downProj: dp }
                   }
                 ]
-            , finalNorm: unsafeAssumeShape fn
+            , finalNorm: fn
             }
           ropeTables = { cos: cosT, sin: sinT }
         key <- lift (mkKey 42)
@@ -756,12 +721,16 @@ trainLoop vagFn opt n acc = do
   trainLoop vagFn opt (n - 1) { params: newParams, state: newState, grad: vag.grad }
 
 -- | Build a small varied weight tensor (linspace in [-0.1, 0.1] reshaped).
-varyingWeight :: forall d. Array Int -> Effect (NDArray d)
+-- | Returns a typed `Tensor s` directly (caller asserts the shape via
+-- | the surrounding type ascription). The single shape claim lives
+-- | inside this helper.
+varyingWeight :: forall s. Array Int -> Effect (Tensor s)
 varyingWeight sh = do
   let n = arrayProduct sh
   base <- linspace (-0.1) 0.1 n
   baseR <- ref base
-  reshape baseR sh
+  reshaped <- reshape baseR sh
+  pure (unsafeAssumeShape (reshaped :: NDArray D1))
 
 arrayProduct :: Array Int -> Int
 arrayProduct = foldl (*) 1
@@ -940,17 +909,17 @@ testLlamaEndToEnd = do
   let layerSumSq = foldl (+) 0.0 perLayerSq
   case preview _embedding ckpt.weights, preview _finalNorm ckpt.weights of
     Just embT, Just fnT -> do
-      eR <- ref (unsafeForgetShape embT :: NDArray D2)
-      esq <- square eR
-      es <- sum esq
-      esF <- toJs es
-      dispose es
+      eR <- refT embT
+      esq <- squareT eR
+      es <- sumT esq
+      esF <- toJsT es
+      disposeT es
       let embSq = unsafeCoerce esF :: Number
-      fR <- ref (unsafeForgetShape fnT :: NDArray D1)
-      fsq <- square fR
-      fs <- sum fsq
-      fsF <- toJs fs
-      dispose fs
+      fR <- refT fnT
+      fsq <- squareT fR
+      fs <- sumT fsq
+      fsF <- toJsT fs
+      disposeT fs
       let fnSq = unsafeCoerce fsF :: Number
       let diff = Math.abs (l2sq - layerSumSq - embSq - fnSq)
       if diff < 1.0e-3 then
@@ -1041,75 +1010,53 @@ trainLoopXform vagFn opt n acc = do
 -- | Allocate a fresh ModelWeights with linspace-derived varied init.
 buildVaryingWeights :: ModelConfig -> Effect ModelWeights
 buildVaryingWeights cfg = do
-  emb <- varyingWeight [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2)
-  an <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
-  wq <- varyingWeight [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2)
-  wk <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2)
-  wv <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2)
-  wo <- varyingWeight [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2)
-  mn <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
-  gp <- varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2)
-  up <- varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2)
-  dp <- varyingWeight [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2)
-  fn <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
+  emb <- varyingWeight [ cfg.vocabSize, cfg.hidden ]
+  an <- varyingWeight [ cfg.hidden ]
+  wq <- varyingWeight [ cfg.hidden, cfg.nHeads * cfg.headDim ]
+  wk <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ]
+  wv <- varyingWeight [ cfg.hidden, cfg.nKvHeads * cfg.headDim ]
+  wo <- varyingWeight [ cfg.nHeads * cfg.headDim, cfg.hidden ]
+  mn <- varyingWeight [ cfg.hidden ]
+  gp <- varyingWeight [ cfg.hidden, cfg.intermediate ]
+  up <- varyingWeight [ cfg.hidden, cfg.intermediate ]
+  dp <- varyingWeight [ cfg.intermediate, cfg.hidden ]
+  fn <- varyingWeight [ cfg.hidden ]
   pure
-    { embedding: unsafeAssumeShape emb
+    { embedding: emb
     , layers:
-        [ { attnNorm: unsafeAssumeShape an
-          , attn:
-              { wq: unsafeAssumeShape wq
-              , wk: unsafeAssumeShape wk
-              , wv: unsafeAssumeShape wv
-              , wo: unsafeAssumeShape wo
-              }
-          , mlpNorm: unsafeAssumeShape mn
-          , mlp:
-              { gateProj: unsafeAssumeShape gp
-              , upProj: unsafeAssumeShape up
-              , downProj: unsafeAssumeShape dp
-              }
+        [ { attnNorm: an
+          , attn: { wq, wk, wv, wo }
+          , mlpNorm: mn
+          , mlp: { gateProj: gp, upProj: up, downProj: dp }
           }
         ]
-    , finalNorm: unsafeAssumeShape fn
+    , finalNorm: fn
     }
 
--- | Ref-bump every leaf of a ModelWeights record, returning a fresh
--- | record with the same NDArrays (refcounts +1 each).
+-- | Ref-bump every leaf of a ModelWeights record, preserving shape
+-- | typing via `refT`.
 refModelWeights :: ModelWeights -> Effect ModelWeights
 refModelWeights w = do
-  emb <- ref (unsafeForgetShape w.embedding :: NDArray D2)
-  fn <- ref (unsafeForgetShape w.finalNorm :: NDArray D1)
+  emb <- refT w.embedding
+  fn <- refT w.finalNorm
   layers <- traverse refLayer w.layers
-  pure
-    { embedding: unsafeAssumeShape emb
-    , layers
-    , finalNorm: unsafeAssumeShape fn
-    }
+  pure { embedding: emb, layers, finalNorm: fn }
   where
   refLayer lw = do
-    an <- ref (unsafeForgetShape lw.attnNorm :: NDArray D1)
-    wq <- ref (unsafeForgetShape lw.attn.wq :: NDArray D2)
-    wk <- ref (unsafeForgetShape lw.attn.wk :: NDArray D2)
-    wv <- ref (unsafeForgetShape lw.attn.wv :: NDArray D2)
-    wo <- ref (unsafeForgetShape lw.attn.wo :: NDArray D2)
-    mn <- ref (unsafeForgetShape lw.mlpNorm :: NDArray D1)
-    gp <- ref (unsafeForgetShape lw.mlp.gateProj :: NDArray D2)
-    up <- ref (unsafeForgetShape lw.mlp.upProj :: NDArray D2)
-    dp <- ref (unsafeForgetShape lw.mlp.downProj :: NDArray D2)
+    an <- refT lw.attnNorm
+    wq <- refT lw.attn.wq
+    wk <- refT lw.attn.wk
+    wv <- refT lw.attn.wv
+    wo <- refT lw.attn.wo
+    mn <- refT lw.mlpNorm
+    gp <- refT lw.mlp.gateProj
+    up <- refT lw.mlp.upProj
+    dp <- refT lw.mlp.downProj
     pure
-      { attnNorm: unsafeAssumeShape an
-      , attn:
-          { wq: unsafeAssumeShape wq
-          , wk: unsafeAssumeShape wk
-          , wv: unsafeAssumeShape wv
-          , wo: unsafeAssumeShape wo
-          }
-      , mlpNorm: unsafeAssumeShape mn
-      , mlp:
-          { gateProj: unsafeAssumeShape gp
-          , upProj: unsafeAssumeShape up
-          , downProj: unsafeAssumeShape dp
-          }
+      { attnNorm: an
+      , attn: { wq, wk, wv, wo }
+      , mlpNorm: mn
+      , mlp: { gateProj: gp, upProj: up, downProj: dp }
       }
 
 testTrainingPytree :: Effect Unit
@@ -1269,40 +1216,31 @@ testStreaming = do
   collected <- Ref.new []
   runManaged
     ( do
-        emb <- allocate (ones [ cfg.vocabSize, cfg.hidden ] :: Effect (NDArray D2))
-        an <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        wq <- allocate (ones [ cfg.hidden, cfg.nHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wk <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wv <- allocate (ones [ cfg.hidden, cfg.nKvHeads * cfg.headDim ] :: Effect (NDArray D2))
-        wo <- allocate (ones [ cfg.nHeads * cfg.headDim, cfg.hidden ] :: Effect (NDArray D2))
-        mn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
-        gp <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        up <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
-        dp <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
-        fn <- allocate (ones [ cfg.hidden ] :: Effect (NDArray D1))
+        emb <- allocateT (Op.onesWith [ cfg.vocabSize, cfg.hidden ])
+        an <- allocateT (Op.onesWith [ cfg.hidden ])
+        wq <- allocateT (Op.onesWith [ cfg.hidden, cfg.nHeads * cfg.headDim ])
+        wk <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+        wv <- allocateT (Op.onesWith [ cfg.hidden, cfg.nKvHeads * cfg.headDim ])
+        wo <- allocateT (Op.onesWith [ cfg.nHeads * cfg.headDim, cfg.hidden ])
+        mn <- allocateT (Op.onesWith [ cfg.hidden ])
+        gp <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+        up <- allocateT (Op.onesWith [ cfg.hidden, cfg.intermediate ])
+        dp <- allocateT (Op.onesWith [ cfg.intermediate, cfg.hidden ])
+        fn <- allocateT (Op.onesWith [ cfg.hidden ])
         rope <- lift (precomputeRoPE cfg.headDim cfg.maxSeqLen cfg.ropeTheta)
         cosT <- allocate (pure rope.cos)
         sinT <- allocate (pure rope.sin)
         let
           weights =
-            { embedding: unsafeAssumeShape emb
+            { embedding: emb
             , layers:
-                [ { attnNorm: unsafeAssumeShape an
-                  , attn:
-                      { wq: unsafeAssumeShape wq
-                      , wk: unsafeAssumeShape wk
-                      , wv: unsafeAssumeShape wv
-                      , wo: unsafeAssumeShape wo
-                      }
-                  , mlpNorm: unsafeAssumeShape mn
-                  , mlp:
-                      { gateProj: unsafeAssumeShape gp
-                      , upProj: unsafeAssumeShape up
-                      , downProj: unsafeAssumeShape dp
-                      }
+                [ { attnNorm: an
+                  , attn: { wq, wk, wv, wo }
+                  , mlpNorm: mn
+                  , mlp: { gateProj: gp, upProj: up, downProj: dp }
                   }
                 ]
-            , finalNorm: unsafeAssumeShape fn
+            , finalNorm: fn
             }
           ropeTables = { cos: cosT, sin: sinT }
           onTok t = Ref.modify_ (\xs -> xs <> [ t ]) collected

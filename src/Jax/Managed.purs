@@ -2,6 +2,7 @@ module Jax.Managed
   ( Managed
   , runManaged
   , allocate
+  , allocateT
   , managed
   ) where
 
@@ -12,6 +13,7 @@ import Data.Either (Either(..))
 import Effect (Effect)
 import Effect.Exception (throwException, try)
 import Jax.Core (NDArray, dispose)
+import Jax.Shape.Tensor (Tensor, disposeT)
 
 -- | Scope-based ownership for jax-js tensors via continuation-passing.
 -- |
@@ -37,6 +39,17 @@ allocate acquire = ContT \k -> do
   a <- acquire
   result <- try (k a)
   dispose a
+  case result of
+    Left err -> throwException err
+    Right v -> pure v
+
+-- | Shape-typed sibling of `allocate`. Same scoping semantics; the
+-- | scoped value is a `Tensor s` instead of a rank-only `NDArray d`.
+allocateT :: forall s. Effect (Tensor s) -> Managed (Tensor s)
+allocateT acquire = ContT \k -> do
+  a <- acquire
+  result <- try (k a)
+  disposeT a
   case result of
     Left err -> throwException err
     Right v -> pure v

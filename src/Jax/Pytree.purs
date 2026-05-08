@@ -36,7 +36,7 @@ import Jax.Coerce (asNumber)
 import Jax.Core (NDArray, dispose, ref, shape, square, sum, toJs)
 import Jax.NN.Block (ModelWeights)
 import Jax.Optics (_layer)
-import Jax.Shape.Tensor (Tensor, unsafeForgetShape)
+import Jax.Shape.Tensor (Tensor, disposeT, refT, shapeT, squareT, sumT, toJsT)
 
 -- =============================================================================
 -- countTensors
@@ -100,14 +100,14 @@ instance foldCountParamLeaf :: Folding CountParam (Effect Int) (NDArray d) (Effe
     sh <- shape x
     pure (acc + Foldable.foldl (*) 1 sh)
 
--- Mirror instance for shape-typed Tensor leaves. Bridges through
--- `unsafeForgetShape` since `shape` is rank-only.
+-- Mirror instance for shape-typed Tensor leaves. Goes through `shapeT`
+-- so the rank cast stays inside the typed-helper module.
 instance foldCountParamTensorLeaf
   :: Folding CountParam (Effect Int) (Tensor s) (Effect Int)
   where
   folding _ accE x = do
     acc <- accE
-    sh <- shape (unsafeForgetShape x :: NDArray Int)
+    sh <- shapeT x
     pure (acc + Foldable.foldl (*) 1 sh)
 
 instance foldCountParamRec ::
@@ -155,18 +155,18 @@ instance foldSumSquaredL2Leaf
     dispose s
     pure (acc + asNumber sF)
 
--- Mirror instance for shape-typed Tensor leaves. Same body, bridged
--- through `unsafeForgetShape`.
+-- Mirror instance for shape-typed Tensor leaves. Same body via the
+-- typed helpers; the rank cast stays inside `Jax.Shape.Tensor`.
 instance foldSumSquaredL2TensorLeaf
   :: Folding SumSquaredL2 (Effect Number) (Tensor s) (Effect Number)
   where
   folding _ accE x = do
     acc <- accE
-    xR <- ref (unsafeForgetShape x :: NDArray Int)
-    sq <- square xR
-    s <- sum sq
-    sF <- toJs s
-    dispose s
+    xR <- refT x
+    sq <- squareT xR
+    s <- sumT sq
+    sF <- toJsT s
+    disposeT s
     pure (acc + asNumber sF)
 
 instance foldSumSquaredL2Rec ::
