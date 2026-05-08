@@ -10,7 +10,12 @@ the rank invariants of the tests they support.
 
 Pattern: `unsafeCoerce`
 Glob: `src/**/*.purs`
-Allowed-in: `src/Jax/Coerce.purs`
+Allowed-in: `src/Jax/Coerce.purs`, `src/Jax/Shape/Tensor.purs`
+
+The Shape/Tensor carve-out covers `unsafeAssumeShape`, `unsafeForgetShape`,
+and `withRank` — phantom-only coercions between rank-tagged `NDArray`
+and shape-tagged `Tensor`. Sound because both are the same opaque
+jax-js handle at runtime; the typing claim is what's caller-asserted.
 
 ## E2. No direct `Console.log` outside entry-point modules (STYLE)
 

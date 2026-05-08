@@ -1,5 +1,6 @@
 module Jax.Core
   ( NDArray
+  , D0
   , D1
   , D2
   , D3
@@ -80,8 +81,11 @@ import Foreign (Foreign)
 foreign import data NDArray :: Type -> Type
 
 -- | Rank tags. Empty data declarations — never constructed at runtime.
--- | Plan specifies D1/D2/D3 with "..." for higher ranks; D4 covers
--- | typical attention tensors (batch, heads, seq, dim).
+-- | D0 is the scalar witness (a `Tensor` of empty shape). D1..D4 cover
+-- | typical attention tensors (batch, heads, seq, dim). Bumping the
+-- | ceiling means adding a new tag here and a `RankWitness` instance
+-- | in `Jax.Shape`.
+data D0
 data D1
 data D2
 data D3
