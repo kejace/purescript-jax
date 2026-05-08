@@ -106,16 +106,17 @@ selectBackend = do
       _ <- trySetDevice "cpu"
       pure "cpu"
 
--- | Swap the default device. On success, clear the loaded-model ref —
--- | tensors live on the previous device and the simplest correct
--- | recovery is "reload weights". On failure, the previous default
--- | device stays active and we surface a `BackendError`.
+-- | Swap the default device. New tensor allocations land on `backend`
+-- | from this point on; existing tensors stay on their original device
+-- | and jax-js migrates lazily when an op crosses devices. We do *not*
+-- | clear the loaded model — the OPFS bytes cache and the parsed
+-- | in-memory state both survive the swap, so a subsequent generate
+-- | works without a reload step.
 handleSetBackend :: Ref (Maybe LoadedModel) -> String -> Effect Unit
-handleSetBackend modelRef backend = do
+handleSetBackend _modelRef backend = do
   ok <- trySetDevice backend
   if ok then do
-    Ref.write Nothing modelRef
-    log $ "[worker] backend → " <> backend <> " (model cleared)"
+    log $ "[worker] backend → " <> backend
     post (Ready { backend })
   else do
     log $ "[worker] backend swap rejected: " <> backend

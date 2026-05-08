@@ -139,6 +139,7 @@ main = do
         setText backendEl r.backend
         setValue backendSelectEl r.backend
         setDisabled backendSelectEl false
+        setText backendHintEl ""
         log $ "[browser] worker ready on " <> r.backend
       BackendError r -> do
         setText backendHintEl ("✗ " <> r.tried <> ": " <> r.err)
@@ -237,13 +238,11 @@ main = do
     setText statsEl "encoding…"
     postIn worker $ Generate
       { prompt: promptStr, maxNew, debug, sampling }
-  -- Preset dropdown: when changed, fill the URL fields with the
-  -- preset's stable local paths and wipe the OPFS fetch cache. Why
-  -- the auto-clear: switching presets means the previous model's
-  -- safetensors blob (which can be GBs) is now dead weight in OPFS,
-  -- and keeping it around risks running into OPFS quota the next
-  -- load. Picking "custom" leaves the URL fields alone but still
-  -- clears — switching to custom usually means swapping models too.
+  -- Preset dropdown: when changed, fill the URL fields. The OPFS fetch
+  -- cache is *not* touched — keeping multiple presets cached lets the
+  -- user flip back and forth without re-downloading anything. The
+  -- explicit "clear cache" button is there for the rare case the user
+  -- wants to reclaim quota (e.g. after loading a 2 GB checkpoint).
   onChange modelPresetEl do
     preset <- getValue modelPresetEl
     case preset of
@@ -264,10 +263,7 @@ main = do
         setValue weightsUrlEl "/local/tinyllama-1.1b-chat/model.safetensors"
         setValue tokenizerUrlEl "/local/tinyllama-1.1b-chat/tokenizer.model"
       _ -> pure unit
-    setText loadStatusEl "preset changed · clearing OPFS cache…"
-    clearOpfs
-      (\n -> setText loadStatusEl ("cache cleared (" <> show n <> " entries) · ready"))
-      (\err -> setText loadStatusEl ("cache clear failed: " <> err))
+    setText loadStatusEl "preset changed · click \"load model\" to fetch"
   -- Wire the Load Model button (weights + tokenizer together).
   onClick loadBtn do
     setText loadStatusEl "starting…"
@@ -329,13 +325,13 @@ main = do
         }
     postIn worker $ MicrogptSample params
   -- Wire backend swap. Sends `SetBackend`; the worker's `Ready` response
-  -- (or `BackendError`) re-syncs the label / hint. The model is cleared
-  -- worker-side on success, so the user must re-load weights to keep
-  -- generating — surface that hint until the next load completes.
+  -- (or `BackendError`) re-syncs the label / hint. The loaded model is
+  -- *not* cleared — jax-js keeps existing tensors on their original
+  -- device and migrates lazily when an op crosses devices, so a
+  -- subsequent generate works without re-loading.
   onChange backendSelectEl do
     backend <- getValue backendSelectEl
-    setText backendHintEl ("→ " <> backend <> "; reload model to migrate weights")
-    setText loadStatusEl "(backend changed — reload model)"
+    setText backendHintEl ("→ " <> backend <> "…")
     postIn worker $ SetBackend { backend }
   -- Wire the Benchmark button. Always uses the synthetic model.
   onClick benchmarkBtn do
