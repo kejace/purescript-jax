@@ -56,6 +56,7 @@ import Effect.Ref as Ref
 import Jax.Optax as Optax
 import Jax.Autodiff (sumSquareLoss, sumSquareTreeLoss, valueAndGrad, valueAndGradT)
 import Effect.Uncurried (EffectFn1, mkEffectFn1, runEffectFn1)
+import Jax.Shape.Tensor (unsafeAssumeShape, unsafeForgetShape)
 import Test.Shape as TestShape
 import Test.ShapeOps as TestShapeOps
 import Test.ShapeNN as TestShapeNN
@@ -494,21 +495,28 @@ testBlock = do
     sinT <- allocate (pure rope.sin)
     ids <- allocate (arrayInt1D [ 0, 1, 2 ])
     let
+      typedLayer attnNorm wq wk wv wo mlpNorm gp up dp =
+        { attnNorm: unsafeAssumeShape attnNorm
+        , attn:
+            { wq: unsafeAssumeShape wq
+            , wk: unsafeAssumeShape wk
+            , wv: unsafeAssumeShape wv
+            , wo: unsafeAssumeShape wo
+            }
+        , mlpNorm: unsafeAssumeShape mlpNorm
+        , mlp:
+            { gateProj: unsafeAssumeShape gp
+            , upProj: unsafeAssumeShape up
+            , downProj: unsafeAssumeShape dp
+            }
+        }
       weights =
-        { embedding: emb
+        { embedding: unsafeAssumeShape emb
         , layers:
-            [ { attnNorm: an0
-              , attn: { wq: wq0, wk: wk0, wv: wv0, wo: wo0 }
-              , mlpNorm: mn0
-              , mlp: { gateProj: gp0, upProj: up0, downProj: dp0 }
-              }
-            , { attnNorm: an1
-              , attn: { wq: wq1, wk: wk1, wv: wv1, wo: wo1 }
-              , mlpNorm: mn1
-              , mlp: { gateProj: gp1, upProj: up1, downProj: dp1 }
-              }
+            [ typedLayer an0 wq0 wk0 wv0 wo0 mn0 gp0 up0 dp0
+            , typedLayer an1 wq1 wk1 wv1 wo1 mn1 gp1 up1 dp1
             ]
-        , finalNorm: fn
+        , finalNorm: unsafeAssumeShape fn
         }
       ropeTables = { cos: cosT, sin: sinT }
     out <- allocate (forwardLogits cfg weights ropeTables ids)
@@ -558,15 +566,24 @@ testGenerate = do
         sinT <- allocate (pure rope.sin)
         let
           weights =
-            { embedding: emb
+            { embedding: unsafeAssumeShape emb
             , layers:
-                [ { attnNorm: an
-                  , attn: { wq, wk, wv, wo }
-                  , mlpNorm: mn
-                  , mlp: { gateProj: gp, upProj: up, downProj: dp }
+                [ { attnNorm: unsafeAssumeShape an
+                  , attn:
+                      { wq: unsafeAssumeShape wq
+                      , wk: unsafeAssumeShape wk
+                      , wv: unsafeAssumeShape wv
+                      , wo: unsafeAssumeShape wo
+                      }
+                  , mlpNorm: unsafeAssumeShape mn
+                  , mlp:
+                      { gateProj: unsafeAssumeShape gp
+                      , upProj: unsafeAssumeShape up
+                      , downProj: unsafeAssumeShape dp
+                      }
                   }
                 ]
-            , finalNorm: fn
+            , finalNorm: unsafeAssumeShape fn
             }
           ropeTables = { cos: cosT, sin: sinT }
         lift (generateGreedy cfg weights ropeTables [ 0, 1 ] 3)
@@ -594,15 +611,24 @@ testGenerate = do
         sinT <- allocate (pure rope.sin)
         let
           weights =
-            { embedding: emb
+            { embedding: unsafeAssumeShape emb
             , layers:
-                [ { attnNorm: an
-                  , attn: { wq, wk, wv, wo }
-                  , mlpNorm: mn
-                  , mlp: { gateProj: gp, upProj: up, downProj: dp }
+                [ { attnNorm: unsafeAssumeShape an
+                  , attn:
+                      { wq: unsafeAssumeShape wq
+                      , wk: unsafeAssumeShape wk
+                      , wv: unsafeAssumeShape wv
+                      , wo: unsafeAssumeShape wo
+                      }
+                  , mlpNorm: unsafeAssumeShape mn
+                  , mlp:
+                      { gateProj: unsafeAssumeShape gp
+                      , upProj: unsafeAssumeShape up
+                      , downProj: unsafeAssumeShape dp
+                      }
                   }
                 ]
-            , finalNorm: fn
+            , finalNorm: unsafeAssumeShape fn
             }
           ropeTables = { cos: cosT, sin: sinT }
         naive <- lift (generateGreedy cfg weights ropeTables [ 0, 1 ] 3)
@@ -630,15 +656,24 @@ testGenerate = do
         sinT <- allocate (pure rope.sin)
         let
           weights =
-            { embedding: emb
+            { embedding: unsafeAssumeShape emb
             , layers:
-                [ { attnNorm: an
-                  , attn: { wq, wk, wv, wo }
-                  , mlpNorm: mn
-                  , mlp: { gateProj: gp, upProj: up, downProj: dp }
+                [ { attnNorm: unsafeAssumeShape an
+                  , attn:
+                      { wq: unsafeAssumeShape wq
+                      , wk: unsafeAssumeShape wk
+                      , wv: unsafeAssumeShape wv
+                      , wo: unsafeAssumeShape wo
+                      }
+                  , mlpNorm: unsafeAssumeShape mn
+                  , mlp:
+                      { gateProj: unsafeAssumeShape gp
+                      , upProj: unsafeAssumeShape up
+                      , downProj: unsafeAssumeShape dp
+                      }
                   }
                 ]
-            , finalNorm: fn
+            , finalNorm: unsafeAssumeShape fn
             }
           ropeTables = { cos: cosT, sin: sinT }
         key <- lift (mkKey 42)
@@ -905,13 +940,13 @@ testLlamaEndToEnd = do
   let layerSumSq = foldl (+) 0.0 perLayerSq
   case preview _embedding ckpt.weights, preview _finalNorm ckpt.weights of
     Just embT, Just fnT -> do
-      eR <- ref embT
+      eR <- ref (unsafeForgetShape embT :: NDArray D2)
       esq <- square eR
       es <- sum esq
       esF <- toJs es
       dispose es
       let embSq = unsafeCoerce esF :: Number
-      fR <- ref fnT
+      fR <- ref (unsafeForgetShape fnT :: NDArray D1)
       fsq <- square fR
       fs <- sum fsq
       fsF <- toJs fs
@@ -1018,41 +1053,63 @@ buildVaryingWeights cfg = do
   dp <- varyingWeight [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2)
   fn <- varyingWeight [ cfg.hidden ] :: Effect (NDArray D1)
   pure
-    { embedding: emb
+    { embedding: unsafeAssumeShape emb
     , layers:
-        [ { attnNorm: an
-          , attn: { wq, wk, wv, wo }
-          , mlpNorm: mn
-          , mlp: { gateProj: gp, upProj: up, downProj: dp }
+        [ { attnNorm: unsafeAssumeShape an
+          , attn:
+              { wq: unsafeAssumeShape wq
+              , wk: unsafeAssumeShape wk
+              , wv: unsafeAssumeShape wv
+              , wo: unsafeAssumeShape wo
+              }
+          , mlpNorm: unsafeAssumeShape mn
+          , mlp:
+              { gateProj: unsafeAssumeShape gp
+              , upProj: unsafeAssumeShape up
+              , downProj: unsafeAssumeShape dp
+              }
           }
         ]
-    , finalNorm: fn
+    , finalNorm: unsafeAssumeShape fn
     }
 
 -- | Ref-bump every leaf of a ModelWeights record, returning a fresh
 -- | record with the same NDArrays (refcounts +1 each).
 refModelWeights :: ModelWeights -> Effect ModelWeights
 refModelWeights w = do
-  emb <- ref w.embedding
-  fn <- ref w.finalNorm
+  emb <- ref (unsafeForgetShape w.embedding :: NDArray D2)
+  fn <- ref (unsafeForgetShape w.finalNorm :: NDArray D1)
   layers <- traverse refLayer w.layers
-  pure { embedding: emb, layers, finalNorm: fn }
+  pure
+    { embedding: unsafeAssumeShape emb
+    , layers
+    , finalNorm: unsafeAssumeShape fn
+    }
   where
   refLayer lw = do
-    an <- ref lw.attnNorm
-    wq <- ref lw.attn.wq
-    wk <- ref lw.attn.wk
-    wv <- ref lw.attn.wv
-    wo <- ref lw.attn.wo
-    mn <- ref lw.mlpNorm
-    gp <- ref lw.mlp.gateProj
-    up <- ref lw.mlp.upProj
-    dp <- ref lw.mlp.downProj
+    an <- ref (unsafeForgetShape lw.attnNorm :: NDArray D1)
+    wq <- ref (unsafeForgetShape lw.attn.wq :: NDArray D2)
+    wk <- ref (unsafeForgetShape lw.attn.wk :: NDArray D2)
+    wv <- ref (unsafeForgetShape lw.attn.wv :: NDArray D2)
+    wo <- ref (unsafeForgetShape lw.attn.wo :: NDArray D2)
+    mn <- ref (unsafeForgetShape lw.mlpNorm :: NDArray D1)
+    gp <- ref (unsafeForgetShape lw.mlp.gateProj :: NDArray D2)
+    up <- ref (unsafeForgetShape lw.mlp.upProj :: NDArray D2)
+    dp <- ref (unsafeForgetShape lw.mlp.downProj :: NDArray D2)
     pure
-      { attnNorm: an
-      , attn: { wq, wk, wv, wo }
-      , mlpNorm: mn
-      , mlp: { gateProj: gp, upProj: up, downProj: dp }
+      { attnNorm: unsafeAssumeShape an
+      , attn:
+          { wq: unsafeAssumeShape wq
+          , wk: unsafeAssumeShape wk
+          , wv: unsafeAssumeShape wv
+          , wo: unsafeAssumeShape wo
+          }
+      , mlpNorm: unsafeAssumeShape mn
+      , mlp:
+          { gateProj: unsafeAssumeShape gp
+          , upProj: unsafeAssumeShape up
+          , downProj: unsafeAssumeShape dp
+          }
       }
 
 testTrainingPytree :: Effect Unit
@@ -1228,15 +1285,24 @@ testStreaming = do
         sinT <- allocate (pure rope.sin)
         let
           weights =
-            { embedding: emb
+            { embedding: unsafeAssumeShape emb
             , layers:
-                [ { attnNorm: an
-                  , attn: { wq, wk, wv, wo }
-                  , mlpNorm: mn
-                  , mlp: { gateProj: gp, upProj: up, downProj: dp }
+                [ { attnNorm: unsafeAssumeShape an
+                  , attn:
+                      { wq: unsafeAssumeShape wq
+                      , wk: unsafeAssumeShape wk
+                      , wv: unsafeAssumeShape wv
+                      , wo: unsafeAssumeShape wo
+                      }
+                  , mlpNorm: unsafeAssumeShape mn
+                  , mlp:
+                      { gateProj: unsafeAssumeShape gp
+                      , upProj: unsafeAssumeShape up
+                      , downProj: unsafeAssumeShape dp
+                      }
                   }
                 ]
-            , finalNorm: fn
+            , finalNorm: unsafeAssumeShape fn
             }
           ropeTables = { cos: cosT, sin: sinT }
           onTok t = Ref.modify_ (\xs -> xs <> [ t ]) collected

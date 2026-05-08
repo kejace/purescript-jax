@@ -58,33 +58,44 @@ import Data.Lens.AffineTraversal (AffineTraversal')
 import Data.Lens.Index (ix)
 import Data.Lens.Record (prop)
 import Type.Proxy (Proxy(..))
-import Jax.Core (D1, D2, NDArray)
-import Jax.NN.Block (AttentionWeights, LayerWeights, MLPWeights, ModelWeights)
+import Jax.NN.Block
+  ( AttentionWeights
+  , LayerWeights
+  , MLPWeights
+  , ModelWeights
+  , Hidden
+  , QDim
+  , KvDim
+  , Intermediate
+  , Vocab
+  )
+import Jax.Shape (S1, S2)
+import Jax.Shape.Tensor (Tensor)
 
 -- =============================================================================
 -- ModelWeights
 -- =============================================================================
 
-_embedding :: Lens' ModelWeights (NDArray D2)
+_embedding :: Lens' ModelWeights (Tensor (S2 Vocab Hidden))
 _embedding = prop (Proxy :: Proxy "embedding")
 
 _layers :: Lens' ModelWeights (Array LayerWeights)
 _layers = prop (Proxy :: Proxy "layers")
 
-_finalNorm :: Lens' ModelWeights (NDArray D1)
+_finalNorm :: Lens' ModelWeights (Tensor (S1 Hidden))
 _finalNorm = prop (Proxy :: Proxy "finalNorm")
 
 -- =============================================================================
 -- LayerWeights
 -- =============================================================================
 
-_attnNorm :: Lens' LayerWeights (NDArray D1)
+_attnNorm :: Lens' LayerWeights (Tensor (S1 Hidden))
 _attnNorm = prop (Proxy :: Proxy "attnNorm")
 
 _attn :: Lens' LayerWeights AttentionWeights
 _attn = prop (Proxy :: Proxy "attn")
 
-_mlpNorm :: Lens' LayerWeights (NDArray D1)
+_mlpNorm :: Lens' LayerWeights (Tensor (S1 Hidden))
 _mlpNorm = prop (Proxy :: Proxy "mlpNorm")
 
 _mlp :: Lens' LayerWeights MLPWeights
@@ -94,29 +105,29 @@ _mlp = prop (Proxy :: Proxy "mlp")
 -- AttentionWeights
 -- =============================================================================
 
-_wq :: Lens' AttentionWeights (NDArray D2)
+_wq :: Lens' AttentionWeights (Tensor (S2 Hidden QDim))
 _wq = prop (Proxy :: Proxy "wq")
 
-_wk :: Lens' AttentionWeights (NDArray D2)
+_wk :: Lens' AttentionWeights (Tensor (S2 Hidden KvDim))
 _wk = prop (Proxy :: Proxy "wk")
 
-_wv :: Lens' AttentionWeights (NDArray D2)
+_wv :: Lens' AttentionWeights (Tensor (S2 Hidden KvDim))
 _wv = prop (Proxy :: Proxy "wv")
 
-_wo :: Lens' AttentionWeights (NDArray D2)
+_wo :: Lens' AttentionWeights (Tensor (S2 QDim Hidden))
 _wo = prop (Proxy :: Proxy "wo")
 
 -- =============================================================================
 -- MLPWeights
 -- =============================================================================
 
-_gateProj :: Lens' MLPWeights (NDArray D2)
+_gateProj :: Lens' MLPWeights (Tensor (S2 Hidden Intermediate))
 _gateProj = prop (Proxy :: Proxy "gateProj")
 
-_upProj :: Lens' MLPWeights (NDArray D2)
+_upProj :: Lens' MLPWeights (Tensor (S2 Hidden Intermediate))
 _upProj = prop (Proxy :: Proxy "upProj")
 
-_downProj :: Lens' MLPWeights (NDArray D2)
+_downProj :: Lens' MLPWeights (Tensor (S2 Intermediate Hidden))
 _downProj = prop (Proxy :: Proxy "downProj")
 
 -- =============================================================================

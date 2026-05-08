@@ -1,10 +1,14 @@
 # Shape-typed tensors in `purescript-jax`
 
-> Status: Stages 1–5 of the [type-level shapes plan][plan] shipped.
+> Status: Stages 1–6 of the [type-level shapes plan][plan] shipped.
 > Stages 1–2 give you the kinds, the operations, and the deferred DSL.
 > Stage 3 demonstrates the system end-to-end on NN-shaped operations.
 > Stage 4 adds the documented escape hatches for shapes you can't fully
-> prove. Stage 5 is this document.
+> prove. Stage 5 is this document. Stage 6 is the giant Block-wide
+> refactor: `ModelWeights` / `LayerWeights` / `AttentionWeights` /
+> `MLPWeights` are now shape-typed records. Role-swap bugs (passing
+> `wq` where `wk` is expected, or `embedding` where `lm_head` is
+> expected) become compile errors.
 >
 > [plan]: ../.claude/plans/mossy-twirling-lemon.md (project-internal)
 
@@ -187,13 +191,93 @@ When you reach for an escape, leave a one-line comment naming what
 external fact (config dim, parser output, etc.) makes the assertion
 true. fp-police flags un-commented uses on audit.
 
-## What Stage 6+ might do
+## Stage 6: weight-record migration (shipped)
+
+The `ModelWeights` family is now shape-typed:
+
+```purescript
+type AttentionWeights =
+  { wq :: Tensor (S2 Hidden QDim)
+  , wk :: Tensor (S2 Hidden KvDim)
+  , wv :: Tensor (S2 Hidden KvDim)
+  , wo :: Tensor (S2 QDim Hidden)
+  }
+
+type MLPWeights =
+  { gateProj :: Tensor (S2 Hidden Intermediate)
+  , upProj   :: Tensor (S2 Hidden Intermediate)
+  , downProj :: Tensor (S2 Intermediate Hidden)
+  }
+
+type ModelWeights =
+  { embedding :: Tensor (S2 Vocab Hidden)
+  , layers :: Array LayerWeights
+  , finalNorm :: Tensor (S1 Hidden)
+  }
+```
+
+The dim symbols (`Hidden`, `QDim`, `KvDim`, `Intermediate`, `Vocab`,
+`NHeads`, `NKvHeads`, `HeadDim`) are exported from `Jax.NN.Block` so
+external code can reference them.
+
+What this catches:
+
+- Passing `wq` where `wk` is expected — `QDim ≠ KvDim` at the type
+  level, type error.
+- Passing `embedding` where the LM head is expected (or vice versa)
+  for an untied checkpoint — `Vocab × Hidden` vs whatever the head
+  expects — type error.
+- Forgetting to transpose a weight before matmul — wrong dim order
+  doesn't unify with the matmul's inner-dim constraint, type error.
+- Mixing up `gateProj` and `downProj` (orientation flip in the MLP)
+  — `Intermediate × Hidden` vs `Hidden × Intermediate`, type error.
+
+What this still doesn't catch:
+
+- `nHeads * headDim ≠ hidden` for runtime configs. `QDim` is just a
+  `Var "qDim"` symbol — distinct from `Hidden` but not provably
+  equal to `nHeads * headDim`. Inside the forward path, the reshape
+  from `[seq, qDim]` to `[seq, nHeads, headDim]` still uses
+  `unsafeForgetShape` + `Core.reshape` — the runtime invariant lives
+  outside the type system.
+
+The internal forward path (`Jax.NN.Block.transformerBlock`,
+`attentionForward`, etc.) bridges back to rank-only `NDArray` at the
+top of each function via `unsafeForgetShape` (aliased as `asD2` /
+`asD1` for readability). The body uses the existing rank-only DSL
+unchanged — zero compute changes, just type-system-level documented
+boundaries.
+
+`Jax.Pytree` gained mirror instances for `Tensor s` leaves alongside
+the existing `NDArray d` ones (same body, same runtime behavior; the
+heterogeneous folder accepts both). `Jax.Optax` and `Jax.Autodiff`
+needed no changes — their pytree-shaped variants (`initT`,
+`updateT`, `applyUpdatesT`, `valueAndGradT`) are polymorphic over
+the tree leaves, so they thread `Tensor`-leaved trees through
+unchanged.
+
+`Jax.Loaders.LlamaAdapter` casts safetensors-derived `NDArray`s to
+typed Tensors via `unsafeAssumeShape` at construction. The shape
+claims align with HF's Llama layout post-transpose:
+
+```
+embedding   : [vocab, hidden]            → Tensor (S2 Vocab Hidden)
+finalNorm   : [hidden]                   → Tensor (S1 Hidden)
+attnNorm    : [hidden]                   → Tensor (S1 Hidden)
+wq (transposed) : [hidden, qDim]         → Tensor (S2 Hidden QDim)
+wo (transposed) : [qDim, hidden]         → Tensor (S2 QDim Hidden)
+gateProj    : [hidden, intermediate]     → Tensor (S2 Hidden Intermediate)
+downProj    : [intermediate, hidden]     → Tensor (S2 Intermediate Hidden)
+```
+
+## What future stages might do
 
 Roughly in increasing order of investment:
 
 1. **Tightened reshape variants**: `reshapeAlongHead` and friends.
-   Eliminates most uses of `reshapeUnchecked` in NN code where the
-   leading dim is `Var`-symbolic but the tail products match.
+   Eliminates most uses of `reshapeUnchecked` / `unsafeForgetShape`
+   in NN code where the leading dim is `Var`-symbolic but the tail
+   products match.
 
 2. **Type-level `ModelConfig`**: lift `hidden`, `nHeads`, `headDim`,
    `intermediate`, `vocabSize` to type-level `Int`s. With `Mul nh hd
@@ -208,13 +292,13 @@ Roughly in increasing order of investment:
    integers. Pretty tractable for prefill/decode boundaries; fiddly
    to plumb through.
 
-4. **Migrate `Jax.NN.Block` to typed weights**: depends on (2). The
-   prize the original plan listed.
-
-5. **Migrate `Jax.NN.RoPE` internals**: low-value once (1) and (2)
+4. **Migrate `Jax.NN.RoPE` internals**: low-value until (1) and (2)
    land — at that point RoPE's slice/concat dance is type-correct
    "for free" via the typed sliceLastAxis + concat ops.
 
-The system as it stands is enough to write *new* shape-typed code
-end-to-end (see `test/Test/ShapeNN.purs`). Existing rank-only code
-keeps working unchanged.
+The system as it stands now: NN code's *weight types* are typed end-
+to-end; the *forward path internals* still bridge to rank-only via
+documented escape helpers. New shape-typed code (Lit-only) can be
+written end-to-end (see `test/Test/ShapeNN.purs`). Existing rank-only
+APIs (Worker, Browser) are unchanged in behavior — only their
+internal representation of weight records is now shape-typed.

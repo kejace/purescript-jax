@@ -11,6 +11,7 @@ import Effect (Effect)
 import Jax.Core (D1, D2, NDArray, ref, transpose)
 import Jax.Loaders.Safetensors (SafetensorsMap, getTensor, tensorNames)
 import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights)
+import Jax.Shape.Tensor (Tensor, unsafeAssumeShape)
 
 -- | A loaded checkpoint pairs the autodiff-friendly `ModelWeights`
 -- | pytree with the LM-head projection. For tied-embedding checkpoints
@@ -59,7 +60,21 @@ loadLlamaWeights cfg st = do
     else
       ref embedding
   layers <- traverse (loadLayer st) (range 0 (cfg.nLayers - 1))
-  pure { weights: { embedding, layers, finalNorm }, lmHead }
+  -- Cast to typed weight record. The shape claims (`[Vocab, Hidden]`,
+  -- `[Hidden]`) match the safetensors metadata for any Llama-arch
+  -- model — that's the contract this adapter is built for. The
+  -- multiplicative invariants (qDim = nHeads * headDim, etc.) within
+  -- the layer weights are *not* proved here; they're caller-asserted
+  -- via `unsafeAssumeShape` and verified at runtime by the matmul
+  -- ops in the forward pass.
+  pure
+    { weights:
+        { embedding: unsafeAssumeShape embedding
+        , layers
+        , finalNorm: unsafeAssumeShape finalNorm
+        }
+    , lmHead
+    }
 
 loadLayer :: SafetensorsMap -> Int -> Effect LayerWeights
 loadLayer st i = do
@@ -74,11 +89,27 @@ loadLayer st i = do
   gp <- getAndTranspose st (prefix <> "mlp.gate_proj.weight")
   up <- getAndTranspose st (prefix <> "mlp.up_proj.weight")
   dp <- getAndTranspose st (prefix <> "mlp.down_proj.weight")
+  -- Cast each NDArray to its typed Tensor counterpart. The shape
+  -- claims align with HF's Llama layout post-transpose:
+  --   wq : [Hidden, QDim]   ([hidden, n_heads * head_dim])
+  --   wk : [Hidden, KvDim]  ([hidden, n_kv_heads * head_dim])
+  --   wo : [QDim, Hidden]   ([n_heads * head_dim, hidden])
+  --   gateProj : [Hidden, Intermediate]
+  --   downProj : [Intermediate, Hidden]
   pure
-    { attnNorm
-    , attn: { wq, wk, wv, wo }
-    , mlpNorm
-    , mlp: { gateProj: gp, upProj: up, downProj: dp }
+    { attnNorm: unsafeAssumeShape attnNorm
+    , attn:
+        { wq: unsafeAssumeShape wq
+        , wk: unsafeAssumeShape wk
+        , wv: unsafeAssumeShape wv
+        , wo: unsafeAssumeShape wo
+        }
+    , mlpNorm: unsafeAssumeShape mlpNorm
+    , mlp:
+        { gateProj: unsafeAssumeShape gp
+        , upProj: unsafeAssumeShape up
+        , downProj: unsafeAssumeShape dp
+        }
     }
   where
   getAndTranspose s name = do

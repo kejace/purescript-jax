@@ -16,6 +16,7 @@ import Jax.Managed (Managed, allocate, runManaged)
 import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights)
 import Jax.NN.Generate (generateGreedyCached)
 import Jax.NN.RoPE (RoPETables, precomputeRoPE)
+import Jax.Shape.Tensor (unsafeAssumeShape)
 
 -- | End-to-end demo: build a tiny synthetic model with all-ones weights,
 -- | run greedy autoregressive generation, log the result.
@@ -75,9 +76,9 @@ buildModel cfg = do
   let
     weights :: ModelWeights
     weights =
-      { embedding: emb
+      { embedding: unsafeAssumeShape emb
       , layers: [ layer0, layer1 ]
-      , finalNorm: fn
+      , finalNorm: unsafeAssumeShape fn
       }
     ropeTables = { cos: cosT, sin: sinT }
   pure { weights, rope: ropeTables }
@@ -96,8 +97,17 @@ buildLayer cfg = do
   up <- allocate (ones [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
   dp <- allocate (ones [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
   pure
-    { attnNorm
-    , attn: { wq, wk, wv, wo }
-    , mlpNorm
-    , mlp: { gateProj: gp, upProj: up, downProj: dp }
+    { attnNorm: unsafeAssumeShape attnNorm
+    , attn:
+        { wq: unsafeAssumeShape wq
+        , wk: unsafeAssumeShape wk
+        , wv: unsafeAssumeShape wv
+        , wo: unsafeAssumeShape wo
+        }
+    , mlpNorm: unsafeAssumeShape mlpNorm
+    , mlp:
+        { gateProj: unsafeAssumeShape gp
+        , upProj: unsafeAssumeShape up
+        , downProj: unsafeAssumeShape dp
+        }
     }

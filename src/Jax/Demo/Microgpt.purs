@@ -49,6 +49,7 @@ import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights, refModelWeights)
 import Jax.NN.Generate (generateTemperature)
 import Jax.NN.RoPE (RoPETables, precomputeRoPE)
 import Jax.NN.Train (makeCrossEntropyLoss)
+import Jax.Shape.Tensor (unsafeAssumeShape)
 import Jax.Optax as Optax
 import Jax.Optax.Schedule as Schedule
 import Jax.Random (Key)
@@ -315,7 +316,13 @@ buildWeights k0 cfg = do
   embedding <- glorotMat nextKey cfg.vocabSize cfg.hidden
   finalNorm <- ones [ cfg.hidden ] :: Effect (NDArray D1)
   layers <- traverse (\_ -> buildLayer nextKey cfg) (Array.range 1 cfg.nLayers)
-  pure { embedding, layers, finalNorm }
+  -- Cast to typed weight record. Shape claims match the constructed
+  -- runtime layout (built deterministically from cfg).
+  pure
+    { embedding: unsafeAssumeShape embedding
+    , layers
+    , finalNorm: unsafeAssumeShape finalNorm
+    }
 
 buildLayer :: Effect Key -> ModelConfig -> Effect LayerWeights
 buildLayer nextKey cfg = do
@@ -329,8 +336,17 @@ buildLayer nextKey cfg = do
   upProj <- glorotMat nextKey cfg.hidden cfg.intermediate
   downProj <- glorotMat nextKey cfg.intermediate cfg.hidden
   pure
-    { attnNorm
-    , attn: { wq, wk, wv, wo }
-    , mlpNorm
-    , mlp: { gateProj, upProj, downProj }
+    { attnNorm: unsafeAssumeShape attnNorm
+    , attn:
+        { wq: unsafeAssumeShape wq
+        , wk: unsafeAssumeShape wk
+        , wv: unsafeAssumeShape wv
+        , wo: unsafeAssumeShape wo
+        }
+    , mlpNorm: unsafeAssumeShape mlpNorm
+    , mlp:
+        { gateProj: unsafeAssumeShape gateProj
+        , upProj: unsafeAssumeShape upProj
+        , downProj: unsafeAssumeShape downProj
+        }
     }

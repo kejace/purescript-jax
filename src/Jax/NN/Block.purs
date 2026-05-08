@@ -12,6 +12,15 @@ module Jax.NN.Block
   , MLPWeights
   , LayerWeights
   , ModelWeights
+  -- * Dim symbols (re-exported for typed callers)
+  , Hidden
+  , NHeads
+  , NKvHeads
+  , HeadDim
+  , QDim
+  , KvDim
+  , Intermediate
+  , Vocab
   , transformerBlock
   , transformerStack
   , transformerBlocksAndNorm
@@ -50,6 +59,8 @@ import Jax.NN.Embed (embed, unembed)
 import Jax.NN.MLP (mlp)
 import Jax.NN.RMSNorm (rmsnorm)
 import Jax.NN.RoPE (RoPETables, applyRoPE)
+import Jax.Shape (Var, S1, S2)
+import Jax.Shape.Tensor (Tensor, unsafeAssumeShape, unsafeForgetShape)
 import Jax.Tensor as T
 
 -- | Static model hyperparameters (no tensors here).
@@ -66,26 +77,51 @@ type ModelConfig =
   , normEps :: Number
   }
 
+-- =============================================================================
+-- Dim symbols for the weight types
+-- =============================================================================
+--
+-- These are `Var Symbol` aliases — same-named Vars unify across the
+-- weight record so role-swap bugs (e.g. passing wq where wk is
+-- expected, or `embedding` where `lm_head` is expected) become
+-- compile errors.
+--
+-- The multiplicative invariants (`QDim = NHeads * HeadDim`, `KvDim =
+-- NKvHeads * HeadDim`) are NOT proved at the type level — those would
+-- require lifting `ModelConfig` to type-level Ints, a separate
+-- refactor. Here `QDim` and `KvDim` are just distinct Symbols, so
+-- the type system enforces "this is the q-projection's column dim"
+-- without proving it equals `nHeads * headDim`.
+
+type Hidden       = Var "hidden"
+type NHeads       = Var "nHeads"
+type NKvHeads     = Var "nKvHeads"
+type HeadDim      = Var "headDim"
+type QDim         = Var "qDim"          -- = nHeads * headDim (unproved)
+type KvDim        = Var "kvDim"         -- = nKvHeads * headDim (unproved)
+type Intermediate = Var "intermediate"
+type Vocab        = Var "vocab"
+
 -- | Linear projection weights for one attention layer.
 type AttentionWeights =
-  { wq :: NDArray D2  -- [hidden, n_heads * head_dim]
-  , wk :: NDArray D2  -- [hidden, n_kv_heads * head_dim]
-  , wv :: NDArray D2  -- [hidden, n_kv_heads * head_dim]
-  , wo :: NDArray D2  -- [n_heads * head_dim, hidden]
+  { wq :: Tensor (S2 Hidden QDim)
+  , wk :: Tensor (S2 Hidden KvDim)
+  , wv :: Tensor (S2 Hidden KvDim)
+  , wo :: Tensor (S2 QDim Hidden)
   }
 
 -- | SwiGLU MLP weights.
 type MLPWeights =
-  { gateProj :: NDArray D2  -- [hidden, intermediate]
-  , upProj :: NDArray D2    -- [hidden, intermediate]
-  , downProj :: NDArray D2  -- [intermediate, hidden]
+  { gateProj :: Tensor (S2 Hidden Intermediate)
+  , upProj   :: Tensor (S2 Hidden Intermediate)
+  , downProj :: Tensor (S2 Intermediate Hidden)
   }
 
 -- | All weights for one transformer layer.
 type LayerWeights =
-  { attnNorm :: NDArray D1  -- [hidden]
+  { attnNorm :: Tensor (S1 Hidden)
   , attn :: AttentionWeights
-  , mlpNorm :: NDArray D1
+  , mlpNorm :: Tensor (S1 Hidden)
   , mlp :: MLPWeights
   }
 
@@ -96,10 +132,31 @@ type LayerWeights =
 -- | this record. Keeping `ModelWeights` rectangular means it stays a
 -- | clean autodiff pytree for training.
 type ModelWeights =
-  { embedding :: NDArray D2  -- [vocab, hidden]
+  { embedding :: Tensor (S2 Vocab Hidden)
   , layers :: Array LayerWeights
-  , finalNorm :: NDArray D1  -- [hidden]
+  , finalNorm :: Tensor (S1 Hidden)
   }
+
+-- =============================================================================
+-- Internal helpers: bridge typed weight tensors to rank-only NDArray.
+-- =============================================================================
+--
+-- The rank-only forward path (which uses Jax.Tensor's T DSL, jax-js
+-- ops, attention / mlp / rmsnorm, applyRoPE) consumes `NDArray d`.
+-- Typed weight fields (`Tensor (S2 ...)`) share a runtime
+-- representation, so the bridge is phantom-only via `unsafeForgetShape`.
+-- Defined here so the body reads cleanly: `asD2 w.wq` instead of
+-- `unsafeForgetShape w.wq :: NDArray D2` at every use site.
+--
+-- Going the other direction (NDArray d → Tensor s) is needed by
+-- `unsafeAssumeShape`, used at boundaries that *produce* weight
+-- values (loaders, allocators).
+
+asD2 :: forall s. Tensor s -> NDArray D2
+asD2 = unsafeForgetShape
+
+asD1 :: forall s. Tensor s -> NDArray D1
+asD1 = unsafeForgetShape
 
 -- =============================================================================
 -- Internal: Forward = ReaderT { cfg } Effect
@@ -132,15 +189,15 @@ attentionForward w seqLen cosSlice sinSlice xNormed = do
   let halfDim = cfg.headDim / 2
       qDim = cfg.nHeads * cfg.headDim
       xT = T.lit xNormed
-  q <- T.run (T.reshapeT (xT T.**. T.lit w.wq) [ seqLen, cfg.nHeads, cfg.headDim ])
-  k <- T.run (T.reshapeT (xT T.**. T.lit w.wk) [ seqLen, cfg.nKvHeads, cfg.headDim ])
-  v <- T.run (T.reshapeT (xT T.**. T.lit w.wv) [ seqLen, cfg.nKvHeads, cfg.headDim ])
+  q <- T.run (T.reshapeT (xT T.**. T.lit (asD2 w.wq)) [ seqLen, cfg.nHeads, cfg.headDim ])
+  k <- T.run (T.reshapeT (xT T.**. T.lit (asD2 w.wk)) [ seqLen, cfg.nKvHeads, cfg.headDim ])
+  v <- T.run (T.reshapeT (xT T.**. T.lit (asD2 w.wv)) [ seqLen, cfg.nKvHeads, cfg.headDim ])
   qRot <- liftEffect $ applyRoPE halfDim q cosSlice sinSlice
   kRot <- liftEffect $ applyRoPE halfDim k cosSlice sinSlice
   kFull <- expandKV kRot
   vFull <- expandKV v
   attnOut <- liftEffect $ attention qRot kFull vFull
-  T.run (T.reshapeT (T.lit attnOut) [ seqLen, qDim ] T.**. T.lit w.wo)
+  T.run (T.reshapeT (T.lit attnOut) [ seqLen, qDim ] T.**. T.lit (asD2 w.wo))
 
 -- | One transformer block with residuals:
 -- |   h = x + attention(rmsnorm(x))
@@ -154,11 +211,11 @@ transformerBlock
   -> Forward (NDArray D2)
 transformerBlock lw seqLen cosSlice sinSlice x = do
   { cfg } <- ask
-  xNormed <- liftEffect $ rmsnorm cfg.normEps x lw.attnNorm
+  xNormed <- liftEffect $ rmsnorm cfg.normEps x (asD1 lw.attnNorm)
   attnOut <- attentionForward lw.attn seqLen cosSlice sinSlice xNormed
   h <- T.run (T.lit x T.+. T.lit attnOut)
-  hNormed <- liftEffect $ rmsnorm cfg.normEps h lw.mlpNorm
-  mlpOut <- liftEffect $ mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
+  hNormed <- liftEffect $ rmsnorm cfg.normEps h (asD1 lw.mlpNorm)
+  mlpOut <- liftEffect $ mlp hNormed (asD2 lw.mlp.gateProj) (asD2 lw.mlp.upProj) (asD2 lw.mlp.downProj)
   T.run (T.lit h T.+. T.lit mlpOut)
 
 -- | Full stack: embed → n × transformerBlock → finalNorm. Returns the
@@ -171,7 +228,7 @@ transformerStack
   -> Effect (NDArray D2)
 transformerStack cfg w rope ids = do
   seqLen <- dimAt ids 0
-  hidden0 <- embed w.embedding ids
+  hidden0 <- embed (asD2 w.embedding) ids
   transformerBlocksAndNorm cfg w rope seqLen hidden0
 
 -- | Variant that takes already-embedded `hidden0 :: [seq, hidden]` and
@@ -202,7 +259,7 @@ transformerBlocksAndNorm cfg w rope seqLen hidden0 = do
         { cfg })
     hidden0
     w.layers
-  rmsnorm cfg.normEps hiddenN w.finalNorm
+  rmsnorm cfg.normEps hiddenN (asD1 w.finalNorm)
 
 -- | Full forward including LM head: returns logits over the vocabulary.
 forwardLogits
@@ -212,7 +269,7 @@ forwardLogits
   -> NDArray D1
   -> Effect (NDArray D2)
 forwardLogits cfg w rope ids =
-  forwardLogitsWithHead cfg w w.embedding rope ids
+  forwardLogitsWithHead cfg w (asD2 w.embedding) rope ids
 
 -- | `forwardLogits` variant that takes an explicit LM-head projection
 -- | matrix `[vocab, hidden]` separate from `weights.embedding`. Use this
@@ -278,9 +335,9 @@ attentionForwardCached w newSeq cosSlice sinSlice prevCache xNormed = do
   let halfDim = cfg.headDim / 2
       qDim = cfg.nHeads * cfg.headDim
       xT = T.lit xNormed
-  q <- T.run (T.reshapeT (xT T.**. T.lit w.wq) [ newSeq, cfg.nHeads, cfg.headDim ])
-  newK <- T.run (T.reshapeT (xT T.**. T.lit w.wk) [ newSeq, cfg.nKvHeads, cfg.headDim ])
-  newV <- T.run (T.reshapeT (xT T.**. T.lit w.wv) [ newSeq, cfg.nKvHeads, cfg.headDim ])
+  q <- T.run (T.reshapeT (xT T.**. T.lit (asD2 w.wq)) [ newSeq, cfg.nHeads, cfg.headDim ])
+  newK <- T.run (T.reshapeT (xT T.**. T.lit (asD2 w.wk)) [ newSeq, cfg.nKvHeads, cfg.headDim ])
+  newV <- T.run (T.reshapeT (xT T.**. T.lit (asD2 w.wv)) [ newSeq, cfg.nKvHeads, cfg.headDim ])
   qRot <- liftEffect $ applyRoPE halfDim q cosSlice sinSlice
   newKRot <- liftEffect $ applyRoPE halfDim newK cosSlice sinSlice
   fullK <- liftEffect $ concatAxis [ prevCache.k, newKRot ] 0
@@ -298,7 +355,7 @@ attentionForwardCached w newSeq cosSlice sinSlice prevCache xNormed = do
     if newSeq == kvSeq
       then attention qRot fullKExp fullVExp
       else attentionNoMask qRot fullKExp fullVExp
-  output <- T.run (T.reshapeT (T.lit attnOut) [ newSeq, qDim ] T.**. T.lit w.wo)
+  output <- T.run (T.reshapeT (T.lit attnOut) [ newSeq, qDim ] T.**. T.lit (asD2 w.wo))
   pure { newCache: { k: fullK, v: fullV }, output }
 
 -- | One transformer block, KVCache-aware.
@@ -312,12 +369,12 @@ transformerBlockCached
   -> Forward { newCache :: KVCache, output :: NDArray D2 }
 transformerBlockCached lw newSeq cosSlice sinSlice prevCache x = do
   { cfg } <- ask
-  xNormed <- liftEffect $ rmsnorm cfg.normEps x lw.attnNorm
+  xNormed <- liftEffect $ rmsnorm cfg.normEps x (asD1 lw.attnNorm)
   { newCache, output: attnOut } <-
     attentionForwardCached lw.attn newSeq cosSlice sinSlice prevCache xNormed
   h <- T.run (T.lit x T.+. T.lit attnOut)
-  hNormed <- liftEffect $ rmsnorm cfg.normEps h lw.mlpNorm
-  mlpOut <- liftEffect $ mlp hNormed lw.mlp.gateProj lw.mlp.upProj lw.mlp.downProj
+  hNormed <- liftEffect $ rmsnorm cfg.normEps h (asD1 lw.mlpNorm)
+  mlpOut <- liftEffect $ mlp hNormed (asD2 lw.mlp.gateProj) (asD2 lw.mlp.upProj) (asD2 lw.mlp.downProj)
   out <- T.run (T.lit h T.+. T.lit mlpOut)
   pure { newCache, output: out }
 
@@ -334,7 +391,7 @@ forwardCached
   -> NDArray D1      -- ^ newIds (token IDs for the new positions)
   -> Effect { newCache :: KVCacheStack, logits :: NDArray D2 }
 forwardCached cfg w rope cache startPos newIds =
-  forwardCachedWithHead cfg w w.embedding rope cache startPos newIds
+  forwardCachedWithHead cfg w (asD2 w.embedding) rope cache startPos newIds
 
 -- | `forwardCached` with an explicit LM-head projection. See
 -- | `forwardLogitsWithHead` for when to use this.
@@ -350,7 +407,7 @@ forwardCachedWithHead
 forwardCachedWithHead cfg w head rope cache startPos newIds = do
   newSeq <- dimAt newIds 0
   let halfDim = cfg.headDim / 2
-  hidden0 <- embed w.embedding newIds
+  hidden0 <- embed (asD2 w.embedding) newIds
   cosFullR <- ref rope.cos
   cosSlice2 <- sliceAxis cosFullR 0 startPos (startPos + newSeq)
   cosSlice3 <- reshape cosSlice2 [ newSeq, 1, halfDim ]
@@ -367,7 +424,7 @@ forwardCachedWithHead cfg w head rope cache startPos newIds = do
     )
     { hidden: hidden0, cachesRev: [] }
     layerPairs
-  hNormed <- rmsnorm cfg.normEps result.hidden w.finalNorm
+  hNormed <- rmsnorm cfg.normEps result.hidden (asD1 w.finalNorm)
   logits <- unembed hNormed head
   pure { newCache: result.cachesRev, logits }
 
@@ -386,24 +443,37 @@ forwardCachedWithHead cfg w head rope cache startPos newIds = do
 -- | one ModelWeights instance buys.
 refModelWeights :: ModelWeights -> Effect ModelWeights
 refModelWeights w = do
-  emb <- ref w.embedding
-  fn <- ref w.finalNorm
+  emb <- ref (asD2 w.embedding)
+  fn <- ref (asD1 w.finalNorm)
   layers <- traverse refLayer w.layers
-  pure { embedding: emb, layers, finalNorm: fn }
+  pure
+    { embedding: unsafeAssumeShape emb
+    , layers
+    , finalNorm: unsafeAssumeShape fn
+    }
   where
   refLayer lw = do
-    an <- ref lw.attnNorm
-    wq <- ref lw.attn.wq
-    wk <- ref lw.attn.wk
-    wv <- ref lw.attn.wv
-    wo <- ref lw.attn.wo
-    mn <- ref lw.mlpNorm
-    gp <- ref lw.mlp.gateProj
-    up <- ref lw.mlp.upProj
-    dp <- ref lw.mlp.downProj
+    an <- ref (asD1 lw.attnNorm)
+    wq <- ref (asD2 lw.attn.wq)
+    wk <- ref (asD2 lw.attn.wk)
+    wv <- ref (asD2 lw.attn.wv)
+    wo <- ref (asD2 lw.attn.wo)
+    mn <- ref (asD1 lw.mlpNorm)
+    gp <- ref (asD2 lw.mlp.gateProj)
+    up <- ref (asD2 lw.mlp.upProj)
+    dp <- ref (asD2 lw.mlp.downProj)
     pure
-      { attnNorm: an
-      , attn: { wq, wk, wv, wo }
-      , mlpNorm: mn
-      , mlp: { gateProj: gp, upProj: up, downProj: dp }
+      { attnNorm: unsafeAssumeShape an
+      , attn:
+          { wq: unsafeAssumeShape wq
+          , wk: unsafeAssumeShape wk
+          , wv: unsafeAssumeShape wv
+          , wo: unsafeAssumeShape wo
+          }
+      , mlpNorm: unsafeAssumeShape mn
+      , mlp:
+          { gateProj: unsafeAssumeShape gp
+          , upProj: unsafeAssumeShape up
+          , downProj: unsafeAssumeShape dp
+          }
       }

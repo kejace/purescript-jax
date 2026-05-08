@@ -36,6 +36,7 @@ import Jax.Coerce (asNumber)
 import Jax.Core (NDArray, dispose, ref, shape, square, sum, toJs)
 import Jax.NN.Block (ModelWeights)
 import Jax.Optics (_layer)
+import Jax.Shape.Tensor (Tensor, unsafeForgetShape)
 
 -- =============================================================================
 -- countTensors
@@ -46,6 +47,11 @@ data CountTensor = CountTensor
 
 -- Folding instance: every NDArray leaf adds 1 to the running count.
 instance foldCountTensorLeaf :: Folding CountTensor Int (NDArray d) Int where
+  folding _ acc _ = acc + 1
+
+-- Mirror instance for shape-typed Tensor leaves. Shares runtime with
+-- NDArray; the body is identical (just count).
+instance foldCountTensorTensorLeaf :: Folding CountTensor Int (Tensor s) Int where
   folding _ acc _ = acc + 1
 
 -- Nested-record descent: when a field is itself a record, recurse via
@@ -94,6 +100,16 @@ instance foldCountParamLeaf :: Folding CountParam (Effect Int) (NDArray d) (Effe
     sh <- shape x
     pure (acc + Foldable.foldl (*) 1 sh)
 
+-- Mirror instance for shape-typed Tensor leaves. Bridges through
+-- `unsafeForgetShape` since `shape` is rank-only.
+instance foldCountParamTensorLeaf
+  :: Folding CountParam (Effect Int) (Tensor s) (Effect Int)
+  where
+  folding _ accE x = do
+    acc <- accE
+    sh <- shape (unsafeForgetShape x :: NDArray Int)
+    pure (acc + Foldable.foldl (*) 1 sh)
+
 instance foldCountParamRec ::
   HFoldl CountParam a { | r } b =>
   Folding CountParam a { | r } b
@@ -133,6 +149,20 @@ instance foldSumSquaredL2Leaf
     -- tensor is consumed by `sum` (one allocation per leaf, freed
     -- before we read the scalar back).
     xR <- ref x
+    sq <- square xR
+    s <- sum sq
+    sF <- toJs s
+    dispose s
+    pure (acc + asNumber sF)
+
+-- Mirror instance for shape-typed Tensor leaves. Same body, bridged
+-- through `unsafeForgetShape`.
+instance foldSumSquaredL2TensorLeaf
+  :: Folding SumSquaredL2 (Effect Number) (Tensor s) (Effect Number)
+  where
+  folding _ accE x = do
+    acc <- accE
+    xR <- ref (unsafeForgetShape x :: NDArray Int)
     sq <- square xR
     s <- sum sq
     sF <- toJs s

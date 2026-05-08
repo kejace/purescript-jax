@@ -69,6 +69,7 @@ import Jax.NN.Block
   , forwardCachedWithHead
   , forwardLogits
   )
+import Jax.Shape.Tensor (unsafeForgetShape)
 import Jax.NN.RoPE (RoPETables)
 import Jax.NN.Sampling (sampleGreedy, sampleTemperature, sampleTopK, sampleTopP)
 import Jax.Random (Key, splitKey2)
@@ -199,7 +200,7 @@ decodeLoop
   -> Int
   -> Effect (Array Int)
 decodeLoop cfg weights rope =
-  decodeLoopWithHead cfg weights weights.embedding rope
+  decodeLoopWithHead cfg weights (unsafeForgetShape weights.embedding :: NDArray D2) rope
 
 disposeKVCache :: KVCache -> Effect Unit
 disposeKVCache kv = do
@@ -371,7 +372,7 @@ generateGreedyCachedStreamUntil
   -> Effect Unit
 generateGreedyCachedStreamUntil cfg weights rope eosId prompt maxNew onToken =
   generateGreedyCachedStreamUntilWithHead
-    cfg weights weights.embedding rope eosId prompt maxNew onToken
+    cfg weights (unsafeForgetShape weights.embedding :: NDArray D2) rope eosId prompt maxNew onToken
 
 -- | Greedy streaming with EOS + an explicit LM-head matrix (for
 -- | checkpoints with `tie_word_embeddings: false`).

@@ -27,6 +27,7 @@ import Jax.Loaders.SentencePieceBPE (SentencePieceBPE)
 import Jax.Loaders.SentencePieceBPE as SBPE
 import Jax.Managed (Managed, allocate, runManaged)
 import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights, emptyKVCacheStack, forwardCachedWithHead)
+import Jax.Shape.Tensor (unsafeAssumeShape, unsafeForgetShape)
 import Jax.NN.Generate
   ( generateGreedyCached
   , generateGreedyCachedStream
@@ -460,7 +461,11 @@ buildSyntheticModel cfg = do
   cosT <- allocate (pure rope.cos)
   sinT <- allocate (pure rope.sin)
   let
-    weights = { embedding: emb, layers: [ layer0, layer1 ], finalNorm: fn }
+    weights =
+      { embedding: unsafeAssumeShape emb
+      , layers: [ layer0, layer1 ]
+      , finalNorm: unsafeAssumeShape fn
+      }
     ropeTables = { cos: cosT, sin: sinT }
   pure { weights, rope: ropeTables }
 
@@ -476,10 +481,19 @@ buildSyntheticLayer cfg = do
   up <- allocate (varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2))
   dp <- allocate (varyingWeight [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2))
   pure
-    { attnNorm
-    , attn: { wq, wk, wv, wo }
-    , mlpNorm
-    , mlp: { gateProj: gp, upProj: up, downProj: dp }
+    { attnNorm: unsafeAssumeShape attnNorm
+    , attn:
+        { wq: unsafeAssumeShape wq
+        , wk: unsafeAssumeShape wk
+        , wv: unsafeAssumeShape wv
+        , wo: unsafeAssumeShape wo
+        }
+    , mlpNorm: unsafeAssumeShape mlpNorm
+    , mlp:
+        { gateProj: unsafeAssumeShape gp
+        , upProj: unsafeAssumeShape up
+        , downProj: unsafeAssumeShape dp
+        }
     }
 
 -- Training: synthetic small transformer ------------------------------------
@@ -502,12 +516,25 @@ buildSyntheticWeights cfg = do
     up <- varyingWeight [ cfg.hidden, cfg.intermediate ] :: Effect (NDArray D2)
     dp <- varyingWeight [ cfg.intermediate, cfg.hidden ] :: Effect (NDArray D2)
     pure
-      { attnNorm
-      , attn: { wq, wk, wv, wo }
-      , mlpNorm
-      , mlp: { gateProj: gp, upProj: up, downProj: dp }
+      { attnNorm: unsafeAssumeShape attnNorm
+      , attn:
+          { wq: unsafeAssumeShape wq
+          , wk: unsafeAssumeShape wk
+          , wv: unsafeAssumeShape wv
+          , wo: unsafeAssumeShape wo
+          }
+      , mlpNorm: unsafeAssumeShape mlpNorm
+      , mlp:
+          { gateProj: unsafeAssumeShape gp
+          , upProj: unsafeAssumeShape up
+          , downProj: unsafeAssumeShape dp
+          }
       }
-  pure { embedding: emb, layers, finalNorm: fn }
+  pure
+    { embedding: unsafeAssumeShape emb
+    , layers
+    , finalNorm: unsafeAssumeShape fn
+    }
 
 traverseN' :: forall a. Int -> (Int -> Effect a) -> Effect (Array a)
 traverseN' n f = go 0 []
@@ -523,26 +550,39 @@ traverseN' n f = go 0 []
 -- | consumes its input.
 refModelWeights :: ModelWeights -> Effect ModelWeights
 refModelWeights w = do
-  emb <- ref w.embedding
-  fn <- ref w.finalNorm
+  emb <- ref (unsafeForgetShape w.embedding :: NDArray D2)
+  fn <- ref (unsafeForgetShape w.finalNorm :: NDArray D1)
   layers <- traverse refLayer w.layers
-  pure { embedding: emb, layers, finalNorm: fn }
+  pure
+    { embedding: unsafeAssumeShape emb
+    , layers
+    , finalNorm: unsafeAssumeShape fn
+    }
   where
   refLayer lw = do
-    an <- ref lw.attnNorm
-    wq <- ref lw.attn.wq
-    wk <- ref lw.attn.wk
-    wv <- ref lw.attn.wv
-    wo <- ref lw.attn.wo
-    mn <- ref lw.mlpNorm
-    gp <- ref lw.mlp.gateProj
-    up <- ref lw.mlp.upProj
-    dp <- ref lw.mlp.downProj
+    an <- ref (unsafeForgetShape lw.attnNorm :: NDArray D1)
+    wq <- ref (unsafeForgetShape lw.attn.wq :: NDArray D2)
+    wk <- ref (unsafeForgetShape lw.attn.wk :: NDArray D2)
+    wv <- ref (unsafeForgetShape lw.attn.wv :: NDArray D2)
+    wo <- ref (unsafeForgetShape lw.attn.wo :: NDArray D2)
+    mn <- ref (unsafeForgetShape lw.mlpNorm :: NDArray D1)
+    gp <- ref (unsafeForgetShape lw.mlp.gateProj :: NDArray D2)
+    up <- ref (unsafeForgetShape lw.mlp.upProj :: NDArray D2)
+    dp <- ref (unsafeForgetShape lw.mlp.downProj :: NDArray D2)
     pure
-      { attnNorm: an
-      , attn: { wq, wk, wv, wo }
-      , mlpNorm: mn
-      , mlp: { gateProj: gp, upProj: up, downProj: dp }
+      { attnNorm: unsafeAssumeShape an
+      , attn:
+          { wq: unsafeAssumeShape wq
+          , wk: unsafeAssumeShape wk
+          , wv: unsafeAssumeShape wv
+          , wo: unsafeAssumeShape wo
+          }
+      , mlpNorm: unsafeAssumeShape mn
+      , mlp:
+          { gateProj: unsafeAssumeShape gp
+          , upProj: unsafeAssumeShape up
+          , downProj: unsafeAssumeShape dp
+          }
       }
 
 -- | Run a synthetic-transformer training demo: small ModelWeights,
