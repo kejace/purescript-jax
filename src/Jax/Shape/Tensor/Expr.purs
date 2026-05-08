@@ -49,6 +49,7 @@ module Jax.Shape.Tensor.Expr
   , softmaxT
     -- * Shape
   , reshapeT
+  , reshapeUncheckedT
   , sliceLastAxisT
   ) where
 
@@ -222,6 +223,18 @@ reshapeT
 reshapeT pNew (T ea) = T do
   a <- ea
   Op.reshape pNew a
+
+-- | DSL form of `Op.reshapeUnchecked` — caller provides the runtime
+-- | size array; the result shape is asserted via the surrounding type.
+-- | See `Op.reshapeUnchecked` for when to use this vs `reshapeT`.
+reshapeUncheckedT
+  :: forall s s'
+   . Array Int
+  -> T s
+  -> T s'
+reshapeUncheckedT dims (T ea) = T do
+  a <- ea
+  Op.reshapeUnchecked dims a
 
 sliceLastAxisT
   :: forall s s' k inner

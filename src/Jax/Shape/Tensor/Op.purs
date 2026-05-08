@@ -40,6 +40,7 @@ module Jax.Shape.Tensor.Op
   , softmax
     -- * Shape ops
   , reshape
+  , reshapeUnchecked
   , sliceLastAxis
   ) where
 
@@ -246,8 +247,8 @@ softmax t axis = do
 -- | containing shapes don't have known products).
 -- |
 -- | For the common NN reshape `[seq, hidden] → [seq, nHeads, headDim]`
--- | where `seq` is a `Var`, this strict version doesn't apply. Stage 4
--- | will add a `reshapePreservingHead` for that case.
+-- | where `seq` is a `Var`, this strict version doesn't apply — use
+-- | `reshapeUnchecked` instead, with the runtime size array.
 reshape
   :: forall s s' n
    . Product s n
@@ -258,6 +259,26 @@ reshape
   -> Effect (Tensor s')
 reshape pNew t = do
   let dims = reflectShape pNew
+  result <- Core.reshape (unsafeForgetShape t :: NDArray Core.D1) dims
+  pure (unsafeAssumeShape result)
+
+-- | Reshape with caller-asserted result shape. The runtime `Array Int`
+-- | must match `s'` element-for-element — the type system can't verify
+-- | this for shapes containing `Var` dims (most NN code, where seq /
+-- | batch / vocab come from runtime config).
+-- |
+-- | Use this where `reshape` doesn't apply; reach for `reshape` (which
+-- | proves `Product s ~ Product s'`) whenever both shapes are
+-- | fully-`Lit`. Documented escape, not an unsafeCoerce — the
+-- | unsoundness is bounded to the user's claim that `dims` matches
+-- | `s'`. If they get the type ascription wrong, downstream typed ops
+-- | will likely fail to compile rather than producing garbage.
+reshapeUnchecked
+  :: forall s s'
+   . Array Int
+  -> Tensor s
+  -> Effect (Tensor s')
+reshapeUnchecked dims t = do
   result <- Core.reshape (unsafeForgetShape t :: NDArray Core.D1) dims
   pure (unsafeAssumeShape result)
 
