@@ -3,7 +3,7 @@
 -- | Lifted from `examples/microgpt/jax/Main.purs` so both the CLI
 -- | demo and the in-browser worker can drive it. The `Params` record
 -- | is the entire configuration surface; `Callbacks` is the
--- | output channel (per-step loss, per-sample text, completion).
+-- | output channel.
 -- |
 -- | The pipeline:
 -- |
@@ -16,13 +16,19 @@
 -- |   5. Sample `numSamples` continuations from a single-char prompt
 -- |      via `generateTemperature`.
 -- |
--- | Callbacks fire as the pipeline progresses; the function is
--- | otherwise pure-effect (no console writes, no global state).
+-- | Train + sample are split (`trainOnly` returns a `Trained` handle;
+-- | `sampleFrom` consumes one) so the browser UI can re-sample with
+-- | new temperature/length settings without retraining. `runMicrogpt`
+-- | is the back-compat one-shot that does both.
 module Jax.Demo.Microgpt
   ( Params
+  , TrainCallbacks
   , Callbacks
+  , Trained
   , defaultParams
   , defaultCorpus
+  , trainOnly
+  , sampleFrom
   , runMicrogpt
   ) where
 
@@ -37,10 +43,11 @@ import Effect (Effect)
 import Effect.Ref as Ref
 import Jax.Autodiff (valueAndGradT)
 import Jax.Core (D1, D2, NDArray, arrayInt1D, dispose, mulScalar, ones, ref)
+import Jax.Loaders.CharTokenizer (CharTokenizer)
 import Jax.Loaders.CharTokenizer as CharTokenizer
 import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights, refModelWeights)
 import Jax.NN.Generate (generateTemperature)
-import Jax.NN.RoPE (precomputeRoPE)
+import Jax.NN.RoPE (RoPETables, precomputeRoPE)
 import Jax.NN.Train (makeCrossEntropyLoss)
 import Jax.Optax as Optax
 import Jax.Optax.Schedule as Schedule
@@ -51,9 +58,17 @@ import Jax.Train as Train
 -- | All user-facing knobs. The model-shape fields (hidden, nHeads, …)
 -- | are mostly fixed in practice; what callers usually vary are
 -- | `corpus`, `numSteps`, `lr`, `temperature`, `numSamples`.
+-- |
+-- | `trainOnly` reads the train-relevant fields (corpus, numSteps,
+-- | lr, seed, plus model shape). `sampleFrom` reads the sample-
+-- | relevant fields (temperature, numSamples, maxSampleLen, seed).
+-- | The shared shape is convenience; nothing prevents you from
+-- | passing two different `Params` records into the two functions
+-- | (e.g. to re-sample with a different temperature).
 type Params =
   { corpus :: String
   , trainWindow :: Int
+  , maxSeqLen :: Int
   , hidden :: Int
   , nHeads :: Int
   , nKvHeads :: Int
@@ -68,13 +83,34 @@ type Params =
   , maxSampleLen :: Int
   }
 
--- | Output channel for the pipeline. All three are optional — pass
--- | `pure unit` for any callback you don't care about.
-type Callbacks =
+-- | Train-phase callbacks. `onStart` fires once before the loop with
+-- | the parameter count (closed-form from the config) and the vocab
+-- | size (extracted from the tokenizer). `onProgress` fires once per
+-- | step with the new loss; the bootstrap pass before the loop fires
+-- | as step 0.
+type TrainCallbacks =
   { onStart    :: { paramCount :: Int, vocabSize :: Int } -> Effect Unit
   , onProgress :: Int -> Number -> Effect Unit  -- step, loss
-  , onSampled  :: Int -> String -> Effect Unit   -- 0-based index, decoded text
+  }
+
+-- | Combined train + sample callbacks for the one-shot `runMicrogpt`.
+type Callbacks =
+  { onStart    :: { paramCount :: Int, vocabSize :: Int } -> Effect Unit
+  , onProgress :: Int -> Number -> Effect Unit
+  , onSampled  :: Int -> String -> Effect Unit
   , onDone     :: Number -> Effect Unit          -- final loss
+  }
+
+-- | Output of training: everything `sampleFrom` needs to produce
+-- | continuations. Holds NDArrays whose lifetime is the caller's
+-- | responsibility. Re-use as many times as you like before
+-- | discarding (the underlying buffers are not consumed by sampling).
+type Trained =
+  { weights :: ModelWeights
+  , cfg :: ModelConfig
+  , rope :: RoPETables
+  , tokenizer :: CharTokenizer
+  , finalLoss :: Number
   }
 
 -- | A small subset of Karpathy's names.txt — enough characters to
@@ -118,6 +154,7 @@ defaultParams :: Params
 defaultParams =
   { corpus: defaultCorpus
   , trainWindow: 32
+  , maxSeqLen: 64
   , hidden: 32
   , nHeads: 4
   , nKvHeads: 4
@@ -132,12 +169,11 @@ defaultParams =
   , maxSampleLen: 16
   }
 
--- | Run the full pipeline: tokenize → init → train → sample. Calls
--- | the relevant callback at each phase boundary; returns when
--- | sampling is done. Throws via Effect's exception channel on
--- | shape mismatches (only possible if `corpus` is empty).
-runMicrogpt :: Params -> Callbacks -> Effect Unit
-runMicrogpt p cb = do
+-- | Phase 1: train. Returns a `Trained` handle the caller can pass to
+-- | `sampleFrom` (zero or more times). Throws via Effect's exception
+-- | channel on shape mismatches (e.g. empty corpus).
+trainOnly :: Params -> TrainCallbacks -> Effect Trained
+trainOnly p cb = do
   -- Section 1: tokenizer.
   let tok = CharTokenizer.fromText p.corpus
       vocabSize = CharTokenizer.size tok
@@ -151,12 +187,11 @@ runMicrogpt p cb = do
       , headDim: p.headDim
       , intermediate: p.intermediate
       , nLayers: p.nLayers
-      , maxSeqLen: p.trainWindow
+      , maxSeqLen: max p.trainWindow p.maxSeqLen
       , vocabSize
       , ropeTheta: 10000.0
       , normEps: 1.0e-6
       }
-  -- Train window: prompt = first N chars, target = shift-by-1.
   let
     allIds = CharTokenizer.encode tok p.corpus
     promptIds = Array.take p.trainWindow allIds
@@ -181,20 +216,55 @@ runMicrogpt p cb = do
   finalState <- Train.stepN opt vagFn p.numSteps
     (\i s -> cb.onProgress i s.lastLoss)
     bootstrap
-  -- Section 5: sample N continuations from a single-char prompt.
-  -- Default start char is the first vocab entry (whatever the corpus
-  -- starts with — for the names corpus that's 'a').
-  let startId = 0
+  pure
+    { weights: finalState.weights
+    , cfg
+    , rope
+    , tokenizer: tok
+    , finalLoss: finalState.lastLoss
+    }
+
+-- | Phase 2: sample. Reads from a `Trained` handle (built by
+-- | `trainOnly`) — the original tensors are *not* consumed, so the
+-- | caller can call this repeatedly with different parameters.
+-- |
+-- | Only the sample-relevant fields of `Params` are consulted:
+-- | `temperature`, `numSamples`, `maxSampleLen`, `seed`. The other
+-- | fields (corpus, model shape, lr, …) are ignored — passing the
+-- | same `Params` you trained with is fine, but you can also build
+-- | a fresh record if you only want to vary the sampling settings.
+sampleFrom
+  :: Trained
+  -> Params
+  -> (Int -> String -> Effect Unit)   -- ^ per-sample callback (idx, text)
+  -> Effect Unit
+sampleFrom t p emit = do
+  let
+    startId = 0   -- corpus first-char index
+    promptLen = 1
+    -- Hard cap: every position read must exist in the RoPE table /
+    -- KV cache, both sized at cfg.maxSeqLen. Generation produces
+    -- `maxSampleLen` new tokens after a 1-token prompt, hitting
+    -- positions 0..maxSampleLen, so the cap is `maxSeqLen - promptLen`.
+    cap = max 1 (t.cfg.maxSeqLen - promptLen)
+    safeLen = min p.maxSampleLen cap
   for_ (Array.range 0 (p.numSamples - 1)) \i -> do
     keyS <- Random.mkKey (p.seed + 1 + i)
-    out <- generateTemperature keyS p.temperature cfg finalState.weights rope
-      [ startId ] p.maxSampleLen
-    cb.onSampled i (CharTokenizer.decode tok out)
-  cb.onDone finalState.lastLoss
+    out <- generateTemperature keyS p.temperature t.cfg t.weights t.rope
+      [ startId ] safeLen
+    emit i (CharTokenizer.decode t.tokenizer out)
+
+-- | Back-compat: train then sample in one call. Same shape as before
+-- | the train/sample split landed; mainly for the CLI demo.
+runMicrogpt :: Params -> Callbacks -> Effect Unit
+runMicrogpt p cb = do
+  trained <- trainOnly p
+    { onStart: cb.onStart, onProgress: cb.onProgress }
+  sampleFrom trained p cb.onSampled
+  cb.onDone trained.finalLoss
 
 -- | Total parameter count for the given config. Closed-form so the
--- | UI can show "training N parameters" before allocations happen;
--- | mirrors what `Pytree.countParams` would tell us after the build.
+-- | UI can show "training N parameters" before allocations happen.
 countParams :: ModelConfig -> Int
 countParams cfg =
   cfg.vocabSize * cfg.hidden               -- embedding

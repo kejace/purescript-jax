@@ -123,6 +123,7 @@ main = do
   log $ "[worker] backend = " <> backend
   post (Ready { backend })
   modelRef <- Ref.new (Nothing :: Maybe LoadedModel)
+  microgptRef <- Ref.new (Nothing :: Maybe Microgpt.Trained)
   selfOnMessage \raw -> case decodeStr workerInCodec raw of
     Left err -> log $ "[worker] decode error: " <> err
     Right msg -> case msg of
@@ -130,7 +131,8 @@ main = do
       Generate r -> handleGenerate modelRef r.prompt r.maxNew r.debug r.sampling
       Benchmark r -> handleBenchmark r.benchPrompt r.maxNew
       TrainSynthetic r -> handleTrainSynthetic r.steps r.learningRate
-      MicrogptTrain r -> handleMicrogptTrain r
+      MicrogptTrain r -> handleMicrogptTrain microgptRef r
+      MicrogptSample r -> handleMicrogptSample microgptRef r
 
 -- Model loading -------------------------------------------------------------
 
@@ -642,16 +644,18 @@ trainLoop cfg rope vagFn opt nLeft stepIdx acc = do
   trainLoop cfg rope vagFn opt (nLeft - 1) (stepIdx + 1)
     { weights: newWeights, state: newState, grad: vag.grad }
 
--- | In-browser microGPT training. Same pipeline as the CLI demo —
--- | same `Jax.Demo.Microgpt.runMicrogpt` — but the callbacks post
--- | typed protocol messages instead of writing to console. The UI
--- | wires those into a live loss feed + per-sample text.
+-- | In-browser microGPT training. Trains a fresh model from the
+-- | given corpus + hyperparameters and stashes the trained record in
+-- | `microgptRef` so a subsequent `MicrogptSample` request can sample
+-- | from it without re-training. The shared parameter defaults come
+-- | from `Microgpt.defaultParams` — fields not in the train request
+-- | (temperature, numSamples, maxSampleLen) are filled with placeholders
+-- | here because `trainOnly` does not consume them.
 handleMicrogptTrain
-  :: { corpus :: String, numSteps :: Int, lr :: Number
-     , temperature :: Number, numSamples :: Int, maxSampleLen :: Int
-     , seed :: Int }
+  :: Ref (Maybe Microgpt.Trained)
+  -> { corpus :: String, numSteps :: Int, lr :: Number, seed :: Int }
   -> Effect Unit
-handleMicrogptTrain r = do
+handleMicrogptTrain microgptRef r = do
   start <- performanceNow
   result <- try do
     let
@@ -660,20 +664,47 @@ handleMicrogptTrain r = do
         { corpus = r.corpus
         , numSteps = r.numSteps
         , lr = r.lr
-        , temperature = r.temperature
-        , numSamples = r.numSamples
-        , maxSampleLen = r.maxSampleLen
         , seed = r.seed
         }
-    Microgpt.runMicrogpt params
+    Microgpt.trainOnly params
       { onStart: \s -> post $ MicrogptStart
           { paramCount: s.paramCount, vocabSize: s.vocabSize, numSteps: r.numSteps }
       , onProgress: \i loss -> post $ MicrogptStep { step: i, loss }
-      , onSampled: \i text -> post $ MicrogptSample { index: i, text }
-      , onDone: \finalLoss -> do
-          end <- performanceNow
-          post $ MicrogptDone { finalLoss, totalMs: end - start }
       }
   case result of
     Left e -> post $ MicrogptError { err: message e }
-    Right _ -> pure unit
+    Right trained -> do
+      Ref.write (Just trained) microgptRef
+      end <- performanceNow
+      post $ MicrogptTrainDone { finalLoss: trained.finalLoss, totalMs: end - start }
+
+-- | Sample from a previously-trained model (kept alive in
+-- | `microgptRef`). If no model has been trained, post an error.
+-- | Sampling does not consume the trained tensors — callers can sample
+-- | repeatedly with different temperature / length / count.
+handleMicrogptSample
+  :: Ref (Maybe Microgpt.Trained)
+  -> { temperature :: Number, numSamples :: Int, maxSampleLen :: Int, seed :: Int }
+  -> Effect Unit
+handleMicrogptSample microgptRef r = do
+  mTrained <- Ref.read microgptRef
+  case mTrained of
+    Nothing -> post $ MicrogptError
+      { err: "no trained model — click 'train' first" }
+    Just trained -> do
+      start <- performanceNow
+      let
+        defs = Microgpt.defaultParams
+        params = defs
+          { temperature = r.temperature
+          , numSamples = r.numSamples
+          , maxSampleLen = r.maxSampleLen
+          , seed = r.seed
+          }
+      result <- try $ Microgpt.sampleFrom trained params \i text ->
+        post $ MicrogptSampled { index: i, text }
+      case result of
+        Left e -> post $ MicrogptError { err: message e }
+        Right _ -> do
+          end <- performanceNow
+          post $ MicrogptSampleDone { totalMs: end - start }

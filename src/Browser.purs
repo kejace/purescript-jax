@@ -44,6 +44,7 @@ foreign import onClickImpl :: EffectFn2 Element (Effect Unit) Unit
 foreign import getValueImpl :: EffectFn1 Element String
 foreign import setHtmlImpl :: EffectFn2 Element String Unit
 foreign import setStyleDisplayImpl :: EffectFn2 Element String Unit
+foreign import setDisabledImpl :: EffectFn2 Element Boolean Unit
 
 foreign import mkWorkerImpl :: EffectFn1 String Worker
 foreign import postMessageImpl :: EffectFn2 Worker String Unit
@@ -69,6 +70,9 @@ setHtml = runEffectFn2 setHtmlImpl
 
 setStyleDisplay :: Element -> String -> Effect Unit
 setStyleDisplay = runEffectFn2 setStyleDisplayImpl
+
+setDisabled :: Element -> Boolean -> Effect Unit
+setDisabled = runEffectFn2 setDisabledImpl
 
 mkWorker :: String -> Effect Worker
 mkWorker = runEffectFn1 mkWorkerImpl
@@ -120,6 +124,7 @@ main = do
   microgptNumSamplesEl <- getElById "microgptNumSamples"
   microgptMaxLenEl <- getElById "microgptMaxLen"
   microgptTrainBtn <- getElById "microgptTrain"
+  microgptSampleBtn <- getElById "microgptSample"
   microgptStatusEl <- getElById "microgptStatus"
   microgptStatsEl <- getElById "microgptStats"
   microgptSamplesEl <- getElById "microgptSamples"
@@ -177,12 +182,16 @@ main = do
         setText microgptSamplesEl ""
       MicrogptStep r -> setText microgptStatsEl
         ( "step " <> show r.step <> " · loss " <> toFixed4 r.loss )
-      MicrogptSample r -> appendText microgptSamplesEl
+      MicrogptSampled r -> appendText microgptSamplesEl
         ("→ " <> r.text <> "\n")
-      MicrogptDone r -> setText microgptStatusEl
-        ( "done · final loss " <> toFixed4 r.finalLoss
-            <> " · " <> toFixed1 r.totalMs <> " ms"
-        )
+      MicrogptTrainDone r -> do
+        setText microgptStatusEl
+          ( "trained · final loss " <> toFixed4 r.finalLoss
+              <> " · " <> toFixed1 r.totalMs <> " ms"
+          )
+        setDisabled microgptSampleBtn false
+      MicrogptSampleDone r -> setText microgptStatusEl
+        ( "sampled · " <> toFixed1 r.totalMs <> " ms" )
       MicrogptError r -> setText microgptStatusEl ("error: " <> r.err)
       LoadStart r -> setText loadStatusEl ("fetching " <> r.url <> "…")
       LoadConfigMsg _ -> pure unit
@@ -222,7 +231,12 @@ main = do
     postIn worker $ Generate
       { prompt: promptStr, maxNew, debug, sampling }
   -- Preset dropdown: when changed, fill the URL fields with the
-  -- preset's stable local paths. Picking "custom" leaves them alone.
+  -- preset's stable local paths and wipe the OPFS fetch cache. Why
+  -- the auto-clear: switching presets means the previous model's
+  -- safetensors blob (which can be GBs) is now dead weight in OPFS,
+  -- and keeping it around risks running into OPFS quota the next
+  -- load. Picking "custom" leaves the URL fields alone but still
+  -- clears — switching to custom usually means swapping models too.
   onChange modelPresetEl do
     preset <- getValue modelPresetEl
     case preset of
@@ -231,10 +245,22 @@ main = do
         setText tokenizerUrlEl ""
         setValue weightsUrlEl "/local/smol-llama-101m/model.safetensors"
         setValue tokenizerUrlEl "/local/smol-llama-101m/tokenizer.model"
+      "llama160m" -> do
+        -- Streams through the /hf vite middleware (see vite.config.js)
+        -- so COOP/COEP headers stay attached. F32 on disk → no BF16
+        -- promotion needed, ~650 MB working set.
+        setValue weightsUrlEl
+          "/hf/Felladrin/Llama-160M-Chat-v1/resolve/main/model.safetensors"
+        setValue tokenizerUrlEl
+          "/hf/Felladrin/Llama-160M-Chat-v1/resolve/main/tokenizer.model"
       "tinyllama" -> do
         setValue weightsUrlEl "/local/tinyllama-1.1b-chat/model.safetensors"
         setValue tokenizerUrlEl "/local/tinyllama-1.1b-chat/tokenizer.model"
       _ -> pure unit
+    setText loadStatusEl "preset changed · clearing OPFS cache…"
+    clearOpfs
+      (\n -> setText loadStatusEl ("cache cleared (" <> show n <> " entries) · ready"))
+      (\err -> setText loadStatusEl ("cache clear failed: " <> err))
   -- Wire the Load Model button (weights + tokenizer together).
   onClick loadBtn do
     setText loadStatusEl "starting…"
@@ -260,30 +286,41 @@ main = do
     setText statsEl ("training " <> show steps <> " steps @ lr=" <> lrStr <> "…")
     postIn worker $ TrainSynthetic { steps, learningRate }
   -- Wire the microGPT Train button. Independent of the inference model;
-  -- runs the full Karpathy-style pipeline (tokenize → init → train →
-  -- sample) inside the worker. Posts MicrogptStart / Step / Sample /
-  -- Done / Error.
+  -- the worker tokenizes, inits, trains, and stashes the trained model
+  -- in a Ref. The Sample button reuses that stashed model so the user
+  -- can resample with new T / numSamples / len without retraining.
+  -- Sample is disabled until the first MicrogptTrainDone arrives.
+  setDisabled microgptSampleBtn true
   onClick microgptTrainBtn do
     setText microgptStatusEl "training…"
     setText microgptStatsEl ""
     setText microgptSamplesEl ""
+    setDisabled microgptSampleBtn true
     corpus <- getValue microgptCorpusEl
     stepsStr <- getValue microgptStepsEl
     lrStr <- getValue microgptLREl
-    tempStr <- getValue microgptTempEl
-    numSamplesStr <- getValue microgptNumSamplesEl
-    maxLenStr <- getValue microgptMaxLenEl
     let
       params =
         { corpus
         , numSteps: fromMaybe 100 (fromString stepsStr)
         , lr: fromMaybe 0.005 (Number.fromString lrStr)
-        , temperature: fromMaybe 0.8 (Number.fromString tempStr)
+        , seed: 1337
+        }
+    postIn worker $ MicrogptTrain params
+  onClick microgptSampleBtn do
+    setText microgptStatusEl "sampling…"
+    setText microgptSamplesEl ""
+    tempStr <- getValue microgptTempEl
+    numSamplesStr <- getValue microgptNumSamplesEl
+    maxLenStr <- getValue microgptMaxLenEl
+    let
+      params =
+        { temperature: fromMaybe 0.8 (Number.fromString tempStr)
         , numSamples: fromMaybe 5 (fromString numSamplesStr)
         , maxSampleLen: fromMaybe 16 (fromString maxLenStr)
         , seed: 1337
         }
-    postIn worker $ MicrogptTrain params
+    postIn worker $ MicrogptSample params
   -- Wire the Benchmark button. Always uses the synthetic model.
   onClick benchmarkBtn do
     setText outputEl ""

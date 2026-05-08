@@ -46,6 +46,7 @@
         <label for="modelPreset">preset</label>
         <select id="modelPreset">
           <option value="smol" selected>Smol-Llama-101M (default · ~400 MB)</option>
+          <option value="llama160m">Felladrin/Llama-160M-Chat-v1 (~650 MB F32, via /hf proxy)</option>
           <option value="tinyllama">TinyLlama-1.1B-Chat-v1.0 (~4.4 GB after BF16→F32)</option>
           <option value="custom">custom URLs (edit fields below)</option>
         </select>
@@ -190,7 +191,8 @@ zoey
         <input id="microgptMaxLen" type="number" value="16" min="1" max="64" />
       </div>
       <div class="row">
-        <button id="microgptTrain">train + sample</button>
+        <button id="microgptTrain">train</button>
+        <button id="microgptSample" disabled title="train first to enable sampling">sample</button>
         <span id="microgptStatus" style="margin-left:0.6em;color:#555;font-family:ui-monospace,monospace;font-size:0.85em;"></span>
       </div>
       <div class="row" id="microgptStats"></div>

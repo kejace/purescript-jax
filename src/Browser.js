@@ -17,6 +17,7 @@ export const onClickImpl = (el, action) => {
 export const getValueImpl = (el) => el.value;
 export const setHtmlImpl = (el, html) => { el.innerHTML = html; };
 export const setStyleDisplayImpl = (el, value) => { el.style.display = value; };
+export const setDisabledImpl = (el, value) => { el.disabled = value; };
 export const getInnerHtmlImpl = (el) => () => el.innerHTML;
 export const setValueImpl = (el, v) => { el.value = v; };
 export const onChangeImpl = (el, action) => {
