@@ -58,6 +58,7 @@ import Jax.Autodiff (sumSquareLoss, sumSquareTreeLoss, valueAndGrad, valueAndGra
 import Effect.Uncurried (EffectFn1, mkEffectFn1, runEffectFn1)
 import Test.Shape as TestShape
 import Test.ShapeOps as TestShapeOps
+import Test.ShapeNN as TestShapeNN
 import Jax.NN.MLP (mlp)
 import Jax.NN.RMSNorm (rmsnorm)
 import Jax.NN.RoPE (applyRoPE, precomputeRoPE)
@@ -139,6 +140,7 @@ specs = do
     it "analytic checks" (liftEffect testNumericalParity)
   TestShape.spec
   TestShapeOps.spec
+  TestShapeNN.spec
 
 -- Assertions ------------------------------------------------------------------
 
