@@ -3,6 +3,7 @@ module Worker where
 import Prelude
 
 import Control.Monad.Trans.Class (lift)
+import Control.Promise (Promise, toAffE)
 import Data.Array as Array
 import Data.Either (Either(..))
 import Data.Foldable (foldl, traverse_)
@@ -10,13 +11,13 @@ import Data.Function.Uncurried (Fn3, runFn3)
 import Data.Maybe (Maybe(..))
 import Data.String (length, take) as String
 import Effect (Effect)
-import Effect.Aff (attempt, launchAff_)
+import Effect.Aff (Aff, attempt, launchAff_)
 import Effect.Class (liftEffect)
 import Effect.Console (log)
 import Effect.Exception (message, throw, try)
 import Effect.Ref (Ref)
 import Effect.Ref as Ref
-import Effect.Uncurried (EffectFn1, runEffectFn1)
+import Effect.Uncurried (EffectFn1, EffectFn2, runEffectFn1, runEffectFn2)
 import Jax.Coerce (asArray1D, asArray1DInt, asNumber)
 import Jax.Core (D1, D2, NDArray, arrayInt1D, dimAt, dispose, linspace, ref, reshape, sliceAxis, toJs, topK)
 import Jax.Core as Core
@@ -65,6 +66,13 @@ foreign import performanceNowImpl :: Effect Number
 foreign import trySetDeviceImpl :: EffectFn1 String Boolean
 foreign import hasWebGpuImpl :: Effect Boolean
 foreign import arrayLengthImpl :: forall a. Array a -> Int
+foreign import devicePutImpl :: forall a. EffectFn2 a String (Promise a)
+
+-- | Migrate a tensor / record-of-tensors to `device`. jax-js's
+-- | `devicePut` walks the tree, transferring every Array leaf, so the
+-- | whole `LoadedModel` can go through a single call.
+devicePut :: forall a. a -> String -> Aff a
+devicePut x dev = toAffE (runEffectFn2 devicePutImpl x dev)
 
 selfOnMessage :: (String -> Effect Unit) -> Effect Unit
 selfOnMessage = runEffectFn1 selfOnMessageImpl
@@ -106,21 +114,38 @@ selectBackend = do
       _ <- trySetDevice "cpu"
       pure "cpu"
 
--- | Swap the default device. New tensor allocations land on `backend`
--- | from this point on; existing tensors stay on their original device
--- | and jax-js migrates lazily when an op crosses devices. We do *not*
--- | clear the loaded model — the OPFS bytes cache and the parsed
--- | in-memory state both survive the swap, so a subsequent generate
--- | works without a reload step.
+-- | Swap the default device. jax-js does *not* auto-migrate cross-device
+-- | ops — a webgpu-allocated weight matmul'd against a wasm-allocated
+-- | activation just hangs in dispatch. So when a model is loaded, we
+-- | call `devicePut(model, backend)` to walk the whole record and
+-- | migrate every tensor to the new device. The migration is async; on
+-- | failure we clear the model ref (forcing the user to reload, which
+-- | the OPFS cache makes fast). On success the migrated tree replaces
+-- | the live model and a subsequent generate works without reload.
 handleSetBackend :: Ref (Maybe LoadedModel) -> String -> Effect Unit
-handleSetBackend _modelRef backend = do
+handleSetBackend modelRef backend = do
   ok <- trySetDevice backend
-  if ok then do
-    log $ "[worker] backend → " <> backend
-    post (Ready { backend })
-  else do
+  if not ok then do
     log $ "[worker] backend swap rejected: " <> backend
     post (BackendError { tried: backend, err: "backend unavailable" })
+  else do
+    log $ "[worker] backend → " <> backend
+    loaded <- Ref.read modelRef
+    case loaded of
+      Nothing -> post (Ready { backend })
+      Just lm -> launchAff_ do
+        liftEffect $ log "[worker] migrating loaded model to new device…"
+        result <- attempt (devicePut lm backend)
+        liftEffect case result of
+          Left err -> do
+            log $ "[worker] migration failed: " <> message err
+              <> " · clearing model (reload via OPFS cache)"
+            Ref.write Nothing modelRef
+            post (Ready { backend })
+          Right migrated -> do
+            Ref.write (Just migrated) modelRef
+            log "[worker] model migrated"
+            post (Ready { backend })
 
 -- Loaded model state --------------------------------------------------------
 

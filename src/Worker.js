@@ -2,7 +2,7 @@
 //
 // Wire format: JSON strings (the PS-side codec handles ser/de).
 
-import { defaultDevice, init } from "@jax-js/jax";
+import { defaultDevice, devicePut, init } from "@jax-js/jax";
 
 // jax-js's `defaultDevice("wasm")` flips a flag but does *not* warm up
 // the backend itself. Hitting an op afterwards then blocks waiting for
@@ -12,6 +12,13 @@ import { defaultDevice, init } from "@jax-js/jax";
 // any message handler is even installed.
 const _initializedDevices = await init();
 console.log(`[jax-js] backends initialized:`, _initializedDevices);
+
+// Migrate a JsTree (tensor / record / array) to `device`. Returns the
+// migrated tree as a Promise; PS-side wraps via `Control.Promise.toAff`.
+// jax-js doesn't auto-migrate cross-device ops, so a backend swap with
+// a loaded model on the previous device must `devicePut` before the
+// next generate or every kernel dispatch hangs.
+export const devicePutImpl = (tree, device) => devicePut(tree, device);
 
 export const selfOnMessageImpl = (cb) => {
   self.onmessage = (e) => cb(e.data)();
