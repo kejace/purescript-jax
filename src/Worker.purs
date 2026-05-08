@@ -28,7 +28,7 @@ import Jax.Loaders.SentencePieceBPE (SentencePieceBPE)
 import Jax.Loaders.SentencePieceBPE as SBPE
 import Jax.Managed (Managed, allocate, allocateT, runManaged)
 import Jax.NN.Block (LayerWeights, ModelConfig, ModelWeights, emptyKVCacheStack, forwardCachedWithHead)
-import Jax.Shape.Tensor (Tensor, refT, unsafeAssumeShape, unsafeForgetShape)
+import Jax.Shape.Tensor (Tensor, refT, unsafeAssumeShape)
 import Jax.NN.Generate
   ( generateGreedyCached
   , generateGreedyCachedStream
@@ -106,6 +106,21 @@ selectBackend = do
       _ <- trySetDevice "cpu"
       pure "cpu"
 
+-- | Swap the default device. On success, clear the loaded-model ref —
+-- | tensors live on the previous device and the simplest correct
+-- | recovery is "reload weights". On failure, the previous default
+-- | device stays active and we surface a `BackendError`.
+handleSetBackend :: Ref (Maybe LoadedModel) -> String -> Effect Unit
+handleSetBackend modelRef backend = do
+  ok <- trySetDevice backend
+  if ok then do
+    Ref.write Nothing modelRef
+    log $ "[worker] backend → " <> backend <> " (model cleared)"
+    post (Ready { backend })
+  else do
+    log $ "[worker] backend swap rejected: " <> backend
+    post (BackendError { tried: backend, err: "backend unavailable" })
+
 -- Loaded model state --------------------------------------------------------
 
 type LoadedModel =
@@ -135,6 +150,7 @@ main = do
       TrainSynthetic r -> handleTrainSynthetic r.steps r.learningRate
       MicrogptTrain r -> handleMicrogptTrain microgptRef r
       MicrogptSample r -> handleMicrogptSample microgptRef r
+      SetBackend r -> handleSetBackend modelRef r.backend
 
 -- Model loading -------------------------------------------------------------
 

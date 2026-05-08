@@ -95,6 +95,8 @@ main = do
   worker <- mkWorker "/dist/worker.js"
   -- UI elements
   backendEl <- getElById "backend"
+  backendSelectEl <- getElById "backendSelect"
+  backendHintEl <- getElById "backendHint"
   generateBtn <- getElById "generate"
   benchmarkBtn <- getElById "benchmark"
   loadBtn <- getElById "loadWeights"
@@ -135,7 +137,12 @@ main = do
     Right msg -> case msg of
       Ready r -> do
         setText backendEl r.backend
+        setValue backendSelectEl r.backend
+        setDisabled backendSelectEl false
         log $ "[browser] worker ready on " <> r.backend
+      BackendError r -> do
+        setText backendHintEl ("✗ " <> r.tried <> ": " <> r.err)
+        log $ "[browser] backend swap failed: " <> r.tried <> " (" <> r.err <> ")"
       TokenText r ->
         if r.isEos then pure unit
         else appendText outputEl r.text
@@ -321,6 +328,15 @@ main = do
         , seed: 1337
         }
     postIn worker $ MicrogptSample params
+  -- Wire backend swap. Sends `SetBackend`; the worker's `Ready` response
+  -- (or `BackendError`) re-syncs the label / hint. The model is cleared
+  -- worker-side on success, so the user must re-load weights to keep
+  -- generating — surface that hint until the next load completes.
+  onChange backendSelectEl do
+    backend <- getValue backendSelectEl
+    setText backendHintEl ("→ " <> backend <> "; reload model to migrate weights")
+    setText loadStatusEl "(backend changed — reload model)"
+    postIn worker $ SetBackend { backend }
   -- Wire the Benchmark button. Always uses the synthetic model.
   onClick benchmarkBtn do
     setText outputEl ""

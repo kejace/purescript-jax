@@ -25,7 +25,16 @@
   <body>
     <h1>purescript-jax</h1>
     <div class="row" id="isolation" style="font-family:ui-monospace,monospace;font-size:0.85em;color:#666;"></div>
-    <div class="row">backend: <span id="backend" class="backend">…</span></div>
+    <div class="row">
+      backend:
+      <select id="backendSelect" style="font:inherit;margin-left:0.4em;" disabled>
+        <option value="webgpu">webgpu</option>
+        <option value="wasm">wasm</option>
+        <option value="cpu">cpu</option>
+      </select>
+      <span id="backend" class="backend" style="margin-left:0.6em;">…</span>
+      <span id="backendHint" style="margin-left:0.6em;color:#888;font-size:0.85em;"></span>
+    </div>
     <script>
       // Diagnostic: surface cross-origin isolation state and SAB availability.
       const el = document.getElementById("isolation");
