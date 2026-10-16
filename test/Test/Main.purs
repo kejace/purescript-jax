@@ -14,6 +14,7 @@ import Foreign (Foreign)
 import Test.Spec (Spec, describe, it)
 import Test.Spec.Reporter.Console (consoleReporter)
 import Test.Spec.Runner (runSpec)
+import Test.Exact as Exact
 import Jax.Core
   ( D1
   , D2
@@ -135,6 +136,7 @@ specs = do
     it "safetensors" (liftEffect testSafetensors)
     it "Llama end-to-end (synthetic fixture)" (liftEffect testLlamaEndToEnd)
     it "HF config decoder (real-world JSON shape)" (liftEffect testHFConfigDecode)
+  Exact.spec
   describe "Schedules + Train helpers" do
     it "linearDecay endpoints" (liftEffect testLinearDecay)
     it "cosineDecay endpoints" (liftEffect testCosineDecay)
